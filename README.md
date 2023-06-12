@@ -35,7 +35,8 @@ climate:
       App.register_component(tclac);
       return {tclac};
     climates:
-      - name: "TCL"    ```
+      - name: "TCL"    
+  ```
       
 ## Thank you
 
