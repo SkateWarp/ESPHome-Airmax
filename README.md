@@ -13,7 +13,7 @@ The custom component is currently hard-coded to keep the beeper always off and t
 
 ## Compatibility
 
-This custom component is based on the TCL UART protocol for air conditioners. As such, it may also work with other brands that use the same protocol, such as TCL, iQool, and Pioneer.
+This custom component is based on the TCL UART protocol for air conditioners. As such, it may also work with other brands that use the same protocol, such as TCL, iQool, and Pioneer Diamond Series.
 
 ## Contributions
 
