@@ -6,6 +6,11 @@ This repository contains a custom component for ESPHome, specifically designed f
 
 The custom component is currently hard-coded to keep the beeper always off and the display always off. As a novice in this field, I've created this custom component to the best of my abilities and understanding.
 
+- Polling every 5 seconds
+- Ability to change mode between cool, dry, fan only, and off
+- Control over fan speed with Auto, Low, Medium, High, Turbo, and Quiet settings
+- Ability to turn the vertical swing on and off
+
 ## Compatibility
 
 This custom component is based on the TCL UART protocol for air conditioners. As such, it may also work with other brands that use the same protocol, such as TCL, iQool, and Pioneer.
