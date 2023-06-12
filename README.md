@@ -4,7 +4,7 @@ This repository contains a custom component for ESPHome, specifically designed f
 
 ## Features
 
-The custom component is currently hard-coded to keep the beeper always off and the display always off. As a novice in this field, I've created this custom component to the best of my abilities and understanding.
+The custom component is currently hard-coded to keep the beeper always off and the display always off. As a novice in this field, I've modified this custom component to the best of my abilities and understanding.
 
 - Polling every 5 seconds
 - Ability to change mode between cool, dry, fan only, and off
