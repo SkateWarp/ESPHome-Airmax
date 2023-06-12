@@ -35,4 +35,9 @@ climate:
       App.register_component(tclac);
       return {tclac};
     climates:
-      - name: "TCL"    
+      - name: "TCL"    ```
+      
+## Thank you
+
+xaxexa for his [ESPHomeTCL](https://github.com/xaxexa/ESPHome-TCLAC) repo
+htmltiger for his invaluable [contribution](https://github.com/htmltiger/tcl-electriq-split-ac) for decoding the protocol. 
