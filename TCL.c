@@ -57,7 +57,7 @@ private:
 
 public:
 
-    TCL() : PollingComponent(2 * 1000) {
+    TCL() : PollingComponent(5 * 1000) {
         checksum = 0;
     }
 
