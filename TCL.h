@@ -27,13 +27,13 @@ using namespace esphome::climate;
 #define FAN_QUIET_POS	33
 
 
-#define FAN_AUTO 		0b10000000	//auto
+#define FAN_AUTO 		0b00000000	//auto
 #define FAN_QUIET 		0x80		//silent
-#define FAN_LOW 		0b00010011	//	|
-#define FAN_MEDIUM  	0b00100011	//	||
-#define FAN_HIGH  		0b00110011	//	|||
+#define FAN_LOW 		0b00010000	//	|
+#define FAN_MEDIUM  		0b00100000	//	||
+#define FAN_HIGH  		0b00110000	//	|||
 #define FAN_DIFFUSE		0b10000000	//	POWER [7]
-#define FAN_SPEED_MASK	0b10110011	//FAN SPEED MASK
+#define FAN_SPEED_MASK		0b10110000	//FAN SPEED MASK
 
 
 #define SWING_POS			10
