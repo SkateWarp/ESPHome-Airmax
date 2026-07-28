@@ -1,0 +1,15 @@
+# Standard ESP32 variant (for example, an ESP32-WROOM DevKit).
+# GPIO17/GPIO16 normally map to UART2 and avoid the console UART.
+substitutions:
+  device_name: airmax-ac-esp32
+  friendly_name: Airmax AC
+  uart_tx_pin: GPIO17
+  uart_rx_pin: GPIO16
+
+packages:
+  tcl_climate_common: !include common.yaml
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino

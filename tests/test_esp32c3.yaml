@@ -1,0 +1,92 @@
+esphome:
+  name: tcl-climate-esp32c3-test
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: arduino
+
+logger:
+  baud_rate: 0
+  level: VERY_VERBOSE
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [tcl_climate]
+
+uart:
+  id: test_uart
+  tx_pin: GPIO1
+  rx_pin: GPIO3
+  baud_rate: 9600
+  data_bits: 8
+  parity: EVEN
+  stop_bits: 1
+
+climate:
+  - platform: tcl_climate
+    id: test_climate
+    name: TCL Test Climate
+    uart_id: test_uart
+    update_interval: 500ms
+    status_timeout: 5s
+    inter_byte_timeout: 50ms
+    temperature_samples: 20
+    supports_heat: true
+    supports_horizontal_swing: true
+    protocol_profile: tclac_38
+    status_frame_length: 68
+    restore_state: true
+
+switch:
+  - platform: tcl_climate
+    tcl_climate_id: test_climate
+    display:
+      name: Display
+    beep:
+      name: Beep
+    health:
+      name: Health
+      restore_mode: ALWAYS_ON
+
+sensor:
+  - platform: tcl_climate
+    tcl_climate_id: test_climate
+    current:
+      name: Current
+    supply_voltage:
+      name: Voltage
+    pipe_in_temperature:
+      name: Pipe In
+    pipe_out_temperature:
+      name: Pipe Out
+    outside_motor:
+      name: Outside Motor
+    fan_speed_raw:
+      name: Fan Raw
+    compressor_state:
+      name: Compressor State
+    vertical_vane_position:
+      name: Vertical Vane
+    horizontal_vane_position:
+      name: Horizontal Vane
+
+text_sensor:
+  - platform: tcl_climate
+    tcl_climate_id: test_climate
+    fan_speed:
+      name: Fan Speed
+    fault:
+      name: Fault
+    protocol_profile:
+      name: Protocol Profile
+
+binary_sensor:
+  - platform: tcl_climate
+    tcl_climate_id: test_climate
+    deep_sleep:
+      name: Deep Sleep
+    clean_filter:
+      name: Clean Filter

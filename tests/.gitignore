@@ -1,0 +1,3 @@
+# Test build output
+/.esphome/
+/secrets.yaml

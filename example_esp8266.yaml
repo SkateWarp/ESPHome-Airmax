@@ -1,0 +1,14 @@
+# ESP8266 variant for compatibility with the original hardware.
+substitutions:
+  device_name: airmax-ac-esp8266
+  friendly_name: Airmax AC
+  uart_tx_pin: GPIO1
+  uart_rx_pin: GPIO3
+
+packages:
+  tcl_climate_common: !include common.yaml
+
+esp8266:
+  board: esp12e
+  # Required to survive a full power loss; otherwise ESP8266 uses RTC RAM.
+  restore_from_flash: true

@@ -1,0 +1,15 @@
+# Main example: ESP32-C3.
+# Change the pins if your board or UART adapter uses different GPIOs.
+substitutions:
+  device_name: airmax-ac
+  friendly_name: Airmax AC
+  uart_tx_pin: GPIO1
+  uart_rx_pin: GPIO3
+
+packages:
+  tcl_climate_common: !include common.yaml
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: arduino

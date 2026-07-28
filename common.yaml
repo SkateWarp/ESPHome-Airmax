@@ -1,0 +1,160 @@
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  min_version: 2026.5.0
+
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [tcl_climate]
+
+uart:
+  id: uart_bus
+  tx_pin: ${uart_tx_pin}
+  rx_pin: ${uart_rx_pin}
+  baud_rate: 9600
+  data_bits: 8
+  parity: EVEN
+  stop_bits: 1
+
+# GPIO1/GPIO3 are UART0 on ESP8266. ESP32-C3 normally logs through
+# USB_SERIAL_JTAG, but serial logging is disabled to keep the TCL bus clean.
+logger:
+  baud_rate: 0
+
+# ESPHome batches preference writes. This avoids a flash write on every change
+# while keeping the blackout recovery window reasonably short.
+preferences:
+  flash_write_interval: 1min
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${friendly_name} Fallback Hotspot"
+    password: !secret fallback_ap_password
+
+captive_portal:
+
+climate:
+  - platform: tcl_climate
+    id: tcl_instance
+    name: ${friendly_name}
+    uart_id: uart_bus
+    update_interval: 500ms
+    status_timeout: 5s
+    inter_byte_timeout: 50ms
+    temperature_samples: 10
+
+    # TX profile proven with the newer working Airmax/TCL implementation.
+    # Other TX layouts are never probed automatically because sending an
+    # incompatible control frame could be unsafe for an unknown model.
+    protocol_profile: tcl_35
+
+    # Passive startup detection of 61, 65 or 68-byte status responses.
+    status_frame_length: auto
+
+    # Restore mode, target, fan, swing and preset after a blackout.
+    # A single combined command is sent only after a valid status response.
+    restore_state: true
+
+    # Optional capabilities seen on related models; disabled by default.
+    supports_heat: false
+    supports_horizontal_swing: false
+    deep_sleep_active_low: true
+
+switch:
+  - platform: restart
+    name: Restart
+
+  - platform: tcl_climate
+    tcl_climate_id: tcl_instance
+    display:
+      name: Display Switch
+      id: disp_switch
+    beep:
+      name: Beep Switch
+      id: beep_switch
+    health:
+      name: Health Switch
+      id: health_switch
+      # Preserve the behavior of the previous configuration.
+      restore_mode: ALWAYS_ON
+
+binary_sensor:
+  - platform: tcl_climate
+    tcl_climate_id: tcl_instance
+    deep_sleep:
+      name: Deep Sleep
+      id: deep_sleep
+
+    # Disabled because the corresponding byte varies between TCL families.
+    # clean_filter:
+    #   name: Clean Filter
+
+sensor:
+  - platform: tcl_climate
+    tcl_climate_id: tcl_instance
+    current:
+      name: Current
+      id: current_sensor
+    supply_voltage:
+      name: Supply Voltage
+      id: voltage_sensor
+      filters:
+        - throttle: 2s
+        - median:
+            window_size: 5
+            send_every: 1
+            send_first_at: 1
+    pipe_in_temperature:
+      name: Temp Pipe In
+      id: pipe_in_sensor
+    pipe_out_temperature:
+      name: Temp Pipe Out
+      id: pipe_out_sensor
+    outside_motor:
+      name: Outside Motor
+      id: outside_motor
+
+    # Optional diagnostics:
+    # fan_speed_raw:
+    #   name: Raw Fan Speed
+    # compressor_state:
+    #   name: Raw Compressor State
+    # vertical_vane_position:
+    #   name: Raw Vertical Vane Position
+    # horizontal_vane_position:
+    #   name: Raw Horizontal Vane Position
+
+  - platform: wifi_signal
+    name: WiFi Signal
+    update_interval: 30s
+
+  - platform: uptime
+    name: Uptime
+    filters:
+      - lambda: return x / 3600.0f;
+    unit_of_measurement: h
+    accuracy_decimals: 1
+
+text_sensor:
+  - platform: tcl_climate
+    tcl_climate_id: tcl_instance
+    fan_speed:
+      name: Fan Speed
+      id: fan_speed_sensor
+    fault:
+      name: Fault
+      id: fault_sensor
+    protocol_profile:
+      name: TCL TX-RX Protocol

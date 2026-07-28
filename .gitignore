@@ -1,0 +1,12 @@
+# ESPHome build output
+.esphome/
+build/
+.pioenvs/
+.piolibdeps/
+
+# Local credentials and generated firmware
+secrets.yaml
+*.bin
+*.elf
+*.pyc
+__pycache__/
