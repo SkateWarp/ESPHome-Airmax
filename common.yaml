@@ -23,8 +23,9 @@ uart:
 logger:
   baud_rate: 0
 
-# ESPHome batches preference writes. This avoids a flash write on every change
-# while keeping the blackout recovery window reasonably short.
+# ESPHome batches preference writes and compares the persistent bytes before
+# touching flash. Unchanged heartbeats do not write; real changes within this
+# window are coalesced while keeping blackout recovery reasonably short.
 preferences:
   flash_write_interval: 1min
 

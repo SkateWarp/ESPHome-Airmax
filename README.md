@@ -145,10 +145,22 @@ No blind command is transmitted before the air conditioner responds. If three
 consecutive valid states do not reflect a command, the component accepts and
 publishes the appliance's real state instead of retrying forever.
 
-The one-minute write interval reduces flash wear. A power cut immediately
-after a change can therefore restore the preceding state. Change the interval
-to `10s` if a shorter recovery window is more important than minimizing flash
-activity.
+ESPHome compares the compact persistent state before touching flash. Repeated
+heartbeats and telemetry-only changes therefore do not produce physical flash
+writes when mode, target temperature, fan, swing and preset remain unchanged.
+The one-minute interval also coalesces multiple real changes into one pending
+state, further reducing flash wear.
+
+A power cut immediately after a real change can therefore restore the
+preceding state. Change the interval to `10s` if a shorter recovery window is
+more important than minimizing flash activity.
+
+On ESP32 and ESP32-C3, the final pending state is compared byte-for-byte with
+NVS when the interval expires. ESP8266 compares updates with its flash-backed
+RAM copy before marking the sector dirty. As an ESP8266-specific edge case, a
+state changed and then reverted within the same interval can still cause one
+sector write; avoiding that would require replacing ESPHome's native
+preferences and is not worth the added restore risk.
 
 ESP32 and ESP32-C3 use flash-backed preferences automatically. ESP8266 also
 requires:
