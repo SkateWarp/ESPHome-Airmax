@@ -16,8 +16,12 @@ using esphome::tcl_climate::TclFrameParser;
 using esphome::tcl_climate::TclFrameParserResult;
 using esphome::tcl_climate::TclProtocolProfile;
 using esphome::tcl_climate::TclProtocolState;
+using esphome::tcl_climate::TclStatusSignature;
+using esphome::tcl_climate::TclStatusSignatureDetector;
 using esphome::tcl_climate::tcl_build_control_frame;
 using esphome::tcl_climate::tcl_decode_status_frame;
+using esphome::tcl_climate::tcl_extract_status_signature;
+using esphome::tcl_climate::tcl_status_state_is_plausible;
 using esphome::tcl_climate::tcl_supported_status_frame_size;
 using esphome::tcl_climate::tcl_validate_status_frame;
 using esphome::tcl_climate::tcl_xor_checksum;
@@ -158,8 +162,124 @@ int main() {
       tcl_xor_checksum(command_response.data(), command_response.size() - 1);
   require(!tcl_validate_status_frame(command_response.data(), command_response.size(), TCL_35),
           "default profile preserves 0x04-only status behavior");
+  require(!tcl_validate_status_frame(command_response.data(), command_response.size(), ELECTRIQ_31) &&
+              !tcl_validate_status_frame(command_response.data(), command_response.size(), PIONEER_31),
+          "31-byte profiles do not decode command responses as heartbeat status");
+  require(tcl_validate_status_frame(command_response.data(), command_response.size(),
+                                    ELECTRIQ_31, true),
+          "an explicit command-response check remains available");
+  require(tcl_validate_status_frame(command_response.data(), command_response.size(), TYJW2_35),
+          "TYJW2 captures use type 0x03 for status");
   require(tcl_validate_status_frame(command_response.data(), command_response.size(), TCLAC_38),
           "tclac profile accepts command response 0x03");
+
+  auto alternate_envelope = status;
+  alternate_envelope[1] = 0x12;
+  alternate_envelope[2] = 0x34;
+  alternate_envelope[5] = 0x03;
+  alternate_envelope[6] = 0x56;
+  alternate_envelope.back() =
+      tcl_xor_checksum(alternate_envelope.data(), alternate_envelope.size() - 1);
+  require(!tcl_validate_status_frame(alternate_envelope.data(), alternate_envelope.size()),
+          "alternate envelope is not accepted without startup learning");
+  TclStatusSignature alternate_signature{};
+  require(tcl_extract_status_signature(alternate_envelope.data(), alternate_envelope.size(),
+                                       alternate_signature, TCL_35),
+          "checksum-valid heartbeat response yields an alternate signature");
+  require(alternate_signature.frame_size == 61 && alternate_signature.byte_1 == 0x12 &&
+              alternate_signature.byte_2 == 0x34 && alternate_signature.byte_5 == 0x03 &&
+              alternate_signature.byte_6 == 0x56,
+          "all model-dependent envelope bytes are learned");
+  require(tcl_validate_status_frame(alternate_envelope.data(), alternate_envelope.size(),
+                                    TCL_35, false, &alternate_signature),
+          "alternate envelope validates only against its learned signature");
+  TclProtocolState alternate_state{};
+  require(tcl_decode_status_frame(alternate_envelope.data(), alternate_envelope.size(),
+                                  alternate_state, TCL_35, false, &alternate_signature),
+          "alternate envelope decodes with its learned signature");
+
+  TclStatusSignatureDetector signature_detector;
+  require(!signature_detector.observe(alternate_signature) && !signature_detector.locked(),
+          "one heartbeat response does not lock a signature");
+  auto alternate_payload = alternate_envelope;
+  alternate_payload[7] ^= 0x10;
+  alternate_payload.back() =
+      tcl_xor_checksum(alternate_payload.data(), alternate_payload.size() - 1);
+  TclStatusSignature alternate_payload_signature{};
+  require(tcl_extract_status_signature(alternate_payload.data(), alternate_payload.size(),
+                                       alternate_payload_signature, TCL_35),
+          "second heartbeat payload has a valid signature");
+  require(signature_detector.observe(alternate_payload_signature) &&
+              signature_detector.locked() &&
+              signature_detector.matches(alternate_payload.data(), alternate_payload.size()),
+          "two different payloads with the same signature lock detection");
+  require(!signature_detector.matches(status.data(), status.size()),
+          "a different signature is rejected after locking");
+
+  auto alternate65 = status65;
+  alternate65[5] = 0x03;
+  alternate65.back() = tcl_xor_checksum(alternate65.data(), alternate65.size() - 1);
+  TclStatusSignature alternate65_signature{};
+  require(tcl_extract_status_signature(alternate65.data(), alternate65.size(),
+                                       alternate65_signature, TCL_35) &&
+              alternate65_signature.frame_size == 65,
+          "65-byte alternate signature learns");
+  auto alternate68 = status68;
+  alternate68[5] = 0x03;
+  alternate68.back() = tcl_xor_checksum(alternate68.data(), alternate68.size() - 1);
+  TclStatusSignature alternate68_signature{};
+  require(tcl_extract_status_signature(alternate68.data(), alternate68.size(),
+                                       alternate68_signature, TCL_35) &&
+              alternate68_signature.frame_size == 68,
+          "68-byte alternate signature learns");
+
+  TclStatusSignatureDetector changing_detector;
+  require(!changing_detector.observe(alternate_signature),
+          "first alternate signature remains a candidate");
+  TclStatusSignature canonical_signature{};
+  require(tcl_extract_status_signature(status.data(), status.size(), canonical_signature, TCL_35),
+          "canonical signature extracts");
+  require(!changing_detector.observe(canonical_signature) &&
+              changing_detector.candidate_count() == 1,
+          "a changed pre-lock signature restarts confirmation");
+  require(changing_detector.observe(canonical_signature) && changing_detector.locked(),
+          "the replacement signature locks after its own second confirmation");
+
+  auto learning_command_response = alternate_envelope;
+  learning_command_response[3] = 0x03;
+  learning_command_response.back() =
+      tcl_xor_checksum(learning_command_response.data(), learning_command_response.size() - 1);
+  TclStatusSignature ignored_learning_signature{};
+  require(!tcl_extract_status_signature(learning_command_response.data(),
+                                        learning_command_response.size(),
+                                        ignored_learning_signature, TCL_35),
+          "TCL 35 command response cannot train heartbeat detection");
+  require(!tcl_extract_status_signature(learning_command_response.data(),
+                                        learning_command_response.size(),
+                                        ignored_learning_signature, ELECTRIQ_31),
+          "ElectriQ command response cannot train heartbeat detection");
+  require(tcl_extract_status_signature(learning_command_response.data(),
+                                       learning_command_response.size(),
+                                       ignored_learning_signature, TYJW2_35),
+          "TYJW2 type 0x03 status can train its explicit profile");
+
+  TclProtocolState plausible_state{};
+  require(tcl_decode_status_frame(status.data(), status.size(), plausible_state),
+          "plausibility fixture decodes");
+  require(tcl_status_state_is_plausible(plausible_state, TCL_35),
+          "known mode and fan are plausible");
+  plausible_state.mode = 0x06;
+  require(!tcl_status_state_is_plausible(plausible_state, TCL_35),
+          "unknown powered mode cannot unlock control");
+  plausible_state.mode = 0x01;
+  plausible_state.fan = 0x05;
+  require(!tcl_status_state_is_plausible(plausible_state, TCL_35) &&
+              tcl_status_state_is_plausible(plausible_state, TCLAC_38),
+          "fan plausibility follows the selected TX profile");
+  plausible_state.power = false;
+  plausible_state.mode = 0x00;
+  require(tcl_status_state_is_plausible(plausible_state, TCL_35),
+          "reserved fan state while OFF cannot prevent signature detection");
 
   auto precise_temperature = status;
   precise_temperature[17] = 0x4A;

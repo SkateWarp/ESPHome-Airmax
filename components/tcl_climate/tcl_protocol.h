@@ -61,6 +61,64 @@ struct TclControlFrame {
   size_t size{0};
 };
 
+// The response envelope is not byte-identical across otherwise compatible
+// TCL indoor units. The frame length and model-dependent envelope bytes are
+// learned from repeated checksum-valid heartbeat replies, then locked for the
+// rest of the boot so unrelated or changing UART traffic cannot enable control.
+struct TclStatusSignature {
+  uint8_t byte_1{0};
+  uint8_t byte_2{0};
+  uint8_t byte_5{0};
+  uint8_t byte_6{0};
+  uint8_t frame_size{0};
+
+  bool is_set() const { return this->frame_size != 0; }
+  bool matches(const uint8_t *data, size_t length) const {
+    return data != nullptr && this->is_set() && length > 6 &&
+           length == this->frame_size &&
+           data[1] == this->byte_1 && data[2] == this->byte_2 &&
+           data[5] == this->byte_5 && data[6] == this->byte_6;
+  }
+  bool operator==(const TclStatusSignature &other) const {
+    return this->byte_1 == other.byte_1 && this->byte_2 == other.byte_2 &&
+           this->byte_5 == other.byte_5 && this->byte_6 == other.byte_6 &&
+           this->frame_size == other.frame_size;
+  }
+};
+
+class TclStatusSignatureDetector {
+ public:
+  static constexpr uint8_t REQUIRED_CONFIRMATIONS = 2;
+
+  bool observe(const TclStatusSignature &observed) {
+    if (!observed.is_set())
+      return false;
+    if (this->active_.is_set())
+      return this->active_ == observed;
+    if (this->candidate_ == observed) {
+      this->candidate_count_++;
+    } else {
+      this->candidate_ = observed;
+      this->candidate_count_ = 1;
+    }
+    if (this->candidate_count_ >= REQUIRED_CONFIRMATIONS)
+      this->active_ = this->candidate_;
+    return this->active_.is_set();
+  }
+
+  bool locked() const { return this->active_.is_set(); }
+  bool matches(const uint8_t *data, size_t length) const {
+    return this->active_.matches(data, length);
+  }
+  uint8_t candidate_count() const { return this->candidate_count_; }
+  const TclStatusSignature &signature() const { return this->active_; }
+
+ protected:
+  TclStatusSignature candidate_{};
+  TclStatusSignature active_{};
+  uint8_t candidate_count_{0};
+};
+
 enum class TclFrameParserResult : uint8_t {
   NONE,
   FRAME_READY,
@@ -86,12 +144,21 @@ uint8_t tcl_xor_checksum(const uint8_t *data, size_t length);
 const char *tcl_protocol_profile_name(TclProtocolProfile profile);
 float tcl_protocol_target_step(TclProtocolProfile profile);
 bool tcl_supported_status_frame_size(size_t length);
+bool tcl_extract_status_signature(const uint8_t *data, size_t length,
+                                  TclStatusSignature &signature,
+                                  TclProtocolProfile profile = TclProtocolProfile::PROFILE_TCL_35,
+                                  bool accept_command_response = false);
 bool tcl_validate_status_frame(const uint8_t *data, size_t length,
                                TclProtocolProfile profile = TclProtocolProfile::PROFILE_TCL_35,
-                               bool accept_command_response = false);
+                               bool accept_command_response = false,
+                               const TclStatusSignature *signature = nullptr);
 bool tcl_decode_status_frame(const uint8_t *data, size_t length, TclProtocolState &state,
                              TclProtocolProfile profile = TclProtocolProfile::PROFILE_TCL_35,
-                             bool accept_command_response = false);
+                             bool accept_command_response = false,
+                             const TclStatusSignature *signature = nullptr);
+bool tcl_status_state_is_plausible(
+    const TclProtocolState &state,
+    TclProtocolProfile profile = TclProtocolProfile::PROFILE_TCL_35);
 bool tcl_build_control_frame(const TclProtocolState &state, TclProtocolProfile profile,
                              TclControlFrame &frame);
 

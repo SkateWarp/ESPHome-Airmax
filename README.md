@@ -12,7 +12,8 @@ features from related models explicit and optional.
 - ESP32-C3, standard ESP32 and ESP8266 support.
 - Non-blocking UART parser with header, declared-length and XOR checksum
   validation.
-- Startup heartbeat and passive detection of 61, 65 or 68-byte status frames.
+- Startup heartbeat and confirmed detection of the response signature plus
+  61, 65 or 68-byte status length.
 - Explicit 31, 35 and 38-byte TX protocol profiles.
 - Climate mode, target temperature, fan, vertical swing, presets and action.
 - Optional Heat and horizontal swing support.
@@ -89,14 +90,23 @@ At startup the component sends the original heartbeat:
 BB 00 01 04 02 01 00 BD
 ```
 
-It then validates the response header, direction, declared length,
-discriminator and XOR checksum. The first valid response locks the RX length
-to 61, 65 or 68 bytes.
+It then validates the response header, type, declared length and XOR checksum.
+Two matching replies from two separate heartbeat cycles are required before
+control is enabled. Their model-dependent envelope bytes `[1]`, `[2]`, `[5]`
+and `[6]`, together with the 61, 65 or 68-byte RX length, are learned and
+locked in RAM until the next reboot. A different signature after that point is
+ignored instead of being learned in service.
 
-Detection is deliberately passive: the component does not probe different TX
-control layouts. Different TX profiles can produce identical status-response
-lengths, so sending trial commands would not identify a model reliably and
-could change unsupported fields.
+This covers units such as the verified Airmax variant that replies with
+`BB 01 00 04 37 03 00 ...` as well as the commonly documented
+`BB 01 00 04 37 04 00 ...` envelope. A checksum-valid reply is never enough by
+itself to unlock control, and command responses cannot train the default
+`tcl_35` detector.
+
+Detection is deliberately limited to heartbeat replies: the component does
+not probe different TX control layouts. Different TX profiles can produce
+identical status-response lengths and envelopes, so sending trial commands
+would not identify a model reliably and could change unsupported fields.
 
 ## Protocol profiles
 
@@ -130,6 +140,13 @@ preferences:
 climate:
   - platform: tcl_climate
     restore_state: true
+
+switch:
+  - platform: tcl_climate
+    tcl_climate_id: tcl_instance
+    restore_state:
+      name: Restore State After Power Loss
+      restore_mode: RESTORE_DEFAULT_ON
 ```
 
 Mode, target temperature, fan, swing and preset are persisted. After power
@@ -140,6 +157,16 @@ returns, the component:
 3. waits for a fresh, valid appliance response;
 4. sends one combined restore command;
 5. waits for a new status frame that confirms the observable fields.
+
+The optional restore switch is a runtime gate for the next boot. It defaults
+to ON, remembers only real ON/OFF changes through ESPHome preferences, and can
+be disabled without changing the current air-conditioner state. While it is
+OFF, climate snapshots continue to stay current, so re-enabling it later uses
+the most recent state. A real switch change is flushed immediately so it also
+survives a power loss before the normal `flash_write_interval`; unchanged
+values still cause no flash write. The climate-level `restore_state: true`
+remains the global permission; setting it to `false` disables restoration
+regardless of the switch.
 
 No blind command is transmitted before the air conditioner responds. If three
 consecutive valid states do not reflect a command, the component accepts and
@@ -177,7 +204,7 @@ This is already present in `example_esp8266.yaml`.
 | Option | Default | Purpose |
 |---|---|---|
 | `protocol_profile` | `tcl_35` | TX command-frame layout |
-| `status_frame_length` | `auto` | `auto`, `61`, `65` or `68` |
+| `status_frame_length` | `auto` | Learn `61`, `65` or `68`; an explicit value still learns and locks the response signature |
 | `restore_state` | `false` | Restore climate state after a restart or blackout |
 | `supports_heat` | `false` | Expose Heat only when supported |
 | `supports_horizontal_swing` | `false` | Expose horizontal swing |

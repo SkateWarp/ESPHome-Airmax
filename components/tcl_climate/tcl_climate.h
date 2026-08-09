@@ -19,6 +19,7 @@ enum class TclSwitchType : uint8_t {
   DISPLAY_CONTROL,
   BEEP_CONTROL,
   HEALTH_CONTROL,
+  RESTORE_STATE_CONTROL,
 };
 
 class TclClimate final : public climate::Climate,
@@ -49,6 +50,9 @@ class TclClimate final : public climate::Climate,
   void set_display_switch(switch_::Switch *value) { this->display_switch_ = value; }
   void set_beep_switch(switch_::Switch *value) { this->beep_switch_ = value; }
   void set_health_switch(switch_::Switch *value) { this->health_switch_ = value; }
+  void set_restore_state_switch(switch_::Switch *value) {
+    this->restore_state_switch_ = value;
+  }
 
   void set_current_sensor(sensor::Sensor *value) { this->current_sensor_ = value; }
   void set_supply_voltage_sensor(sensor::Sensor *value) { this->supply_voltage_sensor_ = value; }
@@ -130,12 +134,14 @@ class TclClimate final : public climate::Climate,
   bool supports_horizontal_swing_{false};
   bool deep_sleep_active_low_{true};
   bool restore_state_enabled_{false};
+  bool restore_state_runtime_enabled_{true};
   bool has_valid_status_{false};
   bool status_timed_out_{false};
   TclProtocolProfile configured_profile_{TclProtocolProfile::PROFILE_TCL_35};
   TclProtocolProfile active_profile_{TclProtocolProfile::PROFILE_TCL_35};
   uint8_t configured_status_frame_size_{0};
   uint8_t active_status_frame_size_{0};
+  TclStatusSignatureDetector status_signature_detector_{};
   uint32_t status_timeout_ms_{5000};
   uint32_t inter_byte_timeout_ms_{50};
   uint32_t last_status_ms_{0};
@@ -164,6 +170,7 @@ class TclClimate final : public climate::Climate,
   switch_::Switch *display_switch_{nullptr};
   switch_::Switch *beep_switch_{nullptr};
   switch_::Switch *health_switch_{nullptr};
+  switch_::Switch *restore_state_switch_{nullptr};
 
   sensor::Sensor *current_sensor_{nullptr};
   sensor::Sensor *supply_voltage_sensor_{nullptr};

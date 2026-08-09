@@ -8,6 +8,7 @@ CONF_TCL_CLIMATE_ID = "tcl_climate_id"
 CONF_DISPLAY = "display"
 CONF_BEEP = "beep"
 CONF_HEALTH = "health"
+CONF_RESTORE_STATE = "restore_state"
 
 TclSwitch = tcl_climate_ns.class_(
     "TclSwitch",
@@ -20,6 +21,7 @@ SWITCH_TYPES = {
     CONF_DISPLAY: TclSwitchType.DISPLAY_CONTROL,
     CONF_BEEP: TclSwitchType.BEEP_CONTROL,
     CONF_HEALTH: TclSwitchType.HEALTH_CONTROL,
+    CONF_RESTORE_STATE: TclSwitchType.RESTORE_STATE_CONTROL,
 }
 
 CONFIG_SCHEMA = cv.All(
@@ -45,6 +47,13 @@ CONFIG_SCHEMA = cv.All(
                 icon="mdi:air-filter",
                 entity_category="config",
                 default_restore_mode="DISABLED",
+                block_inverted=True,
+            ),
+            cv.Optional(CONF_RESTORE_STATE): switch.switch_schema(
+                TclSwitch,
+                icon="mdi:backup-restore",
+                entity_category="config",
+                default_restore_mode="RESTORE_DEFAULT_ON",
                 block_inverted=True,
             ),
         }

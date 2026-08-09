@@ -51,6 +51,26 @@ bool profile_is_tclac(const TclProtocolProfile profile) {
   return profile == TclProtocolProfile::PROFILE_TCLAC_38;
 }
 
+bool profile_uses_type_03_status(const TclProtocolProfile profile) {
+  return profile_is_tyjw2(profile) || profile_is_tclac(profile);
+}
+
+bool validate_status_envelope(const uint8_t *data, const size_t length,
+                              const TclProtocolProfile profile,
+                              const bool accept_command_response) {
+  if (data == nullptr || !tcl_supported_status_frame_size(length))
+    return false;
+  if (data[0] != TCL_HEADER)
+    return false;
+  if (data[3] != TCL_STATUS_COMMAND &&
+      !(data[3] == TCL_COMMAND_RESPONSE &&
+        (profile_uses_type_03_status(profile) || accept_command_response)))
+    return false;
+  if (static_cast<size_t>(data[4]) + 6U != length)
+    return false;
+  return tcl_xor_checksum(data, length - 1) == data[length - 1];
+}
+
 size_t profile_control_size(const TclProtocolProfile profile) {
   if (profile_is_tclac(profile))
     return TCL_CONTROL_FRAME_38_SIZE;
@@ -220,27 +240,38 @@ bool tcl_supported_status_frame_size(const size_t length) {
          length == TCL_STATUS_FRAME_68_SIZE;
 }
 
+bool tcl_extract_status_signature(const uint8_t *data, const size_t length,
+                                  TclStatusSignature &signature,
+                                  const TclProtocolProfile profile,
+                                  const bool accept_command_response) {
+  if (!validate_status_envelope(data, length, profile, accept_command_response))
+    return false;
+  signature.byte_1 = data[1];
+  signature.byte_2 = data[2];
+  signature.byte_5 = data[5];
+  signature.byte_6 = data[6];
+  signature.frame_size = static_cast<uint8_t>(length);
+  return true;
+}
+
 bool tcl_validate_status_frame(const uint8_t *data, const size_t length,
-                               TclProtocolProfile profile, const bool accept_command_response) {
-  if (data == nullptr || !tcl_supported_status_frame_size(length))
+                               const TclProtocolProfile profile,
+                               const bool accept_command_response,
+                               const TclStatusSignature *signature) {
+  if (!validate_status_envelope(data, length, profile, accept_command_response))
     return false;
-  if (data[0] != TCL_HEADER || data[1] != 0x01 || data[2] != 0x00 ||
-      data[5] != 0x04 || data[6] != 0x00)
-    return false;
-  const bool profile_accepts_command_response =
-      profile != TclProtocolProfile::PROFILE_TCL_35;
-  if (data[3] != TCL_STATUS_COMMAND &&
-      !(data[3] == TCL_COMMAND_RESPONSE &&
-        (profile_accepts_command_response || accept_command_response)))
-    return false;
-  if (static_cast<size_t>(data[4]) + 6U != length)
-    return false;
-  return tcl_xor_checksum(data, length - 1) == data[length - 1];
+  if (signature != nullptr)
+    return signature->matches(data, length);
+  // Preserve the strict canonical envelope for callers that do not opt into
+  // startup signature learning.
+  return data[1] == 0x01 && data[2] == 0x00 && data[5] == 0x04 && data[6] == 0x00;
 }
 
 bool tcl_decode_status_frame(const uint8_t *data, const size_t length, TclProtocolState &state,
-                             TclProtocolProfile profile, const bool accept_command_response) {
-  if (!tcl_validate_status_frame(data, length, profile, accept_command_response))
+                             const TclProtocolProfile profile,
+                             const bool accept_command_response,
+                             const TclStatusSignature *signature) {
+  if (!tcl_validate_status_frame(data, length, profile, accept_command_response, signature))
     return false;
 
   TclProtocolState decoded{};
@@ -285,6 +316,16 @@ bool tcl_decode_status_frame(const uint8_t *data, const size_t length, TclProtoc
 
   state = decoded;
   return true;
+}
+
+bool tcl_status_state_is_plausible(const TclProtocolState &state,
+                                   const TclProtocolProfile profile) {
+  uint8_t ignored = 0;
+  const bool mode_is_known =
+      (!state.power && state.mode == 0) || map_status_mode_to_control(state.mode, ignored);
+  const bool fan_is_known =
+      !state.power || map_status_fan_to_control(state.fan, profile, ignored);
+  return mode_is_known && fan_is_known;
 }
 
 bool tcl_build_control_frame(const TclProtocolState &state, TclProtocolProfile profile,

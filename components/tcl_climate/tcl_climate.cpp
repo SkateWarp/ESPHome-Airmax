@@ -50,8 +50,9 @@ void TclClimate::setup() {
   this->restore_switch_(this->display_switch_, TclSwitchType::DISPLAY_CONTROL);
   this->restore_switch_(this->beep_switch_, TclSwitchType::BEEP_CONTROL);
   this->restore_switch_(this->health_switch_, TclSwitchType::HEALTH_CONTROL);
+  this->restore_switch_(this->restore_state_switch_, TclSwitchType::RESTORE_STATE_CONTROL);
 
-  if (this->restore_state_enabled_) {
+  if (this->restore_state_enabled_ && this->restore_state_runtime_enabled_) {
     auto restored = this->restore_state_();
     if (restored.has_value()) {
       // control() only queues the compact restored state. Transmission remains
@@ -61,6 +62,8 @@ void TclClimate::setup() {
     } else {
       ESP_LOGI(TAG, "State restore enabled, but no persisted climate state exists yet");
     }
+  } else if (this->restore_state_enabled_) {
+    ESP_LOGI(TAG, "Persisted climate restore is disabled by its runtime switch");
   }
   this->publish_profile_state_();
 }
@@ -81,10 +84,23 @@ void TclClimate::dump_config() {
     ESP_LOGCONFIG(TAG, "  Status frame length: %u bytes",
                   this->configured_status_frame_size_);
   }
+  if (this->status_signature_detector_.locked()) {
+    const auto &signature = this->status_signature_detector_.signature();
+    ESP_LOGCONFIG(TAG,
+                  "  Response signature: auto (locked to [1]=0x%02X [2]=0x%02X "
+                  "[5]=0x%02X [6]=0x%02X)",
+                  signature.byte_1, signature.byte_2, signature.byte_5,
+                  signature.byte_6);
+  } else {
+    ESP_LOGCONFIG(TAG, "  Response signature: auto (waiting for two heartbeat replies)");
+  }
   ESP_LOGCONFIG(TAG, "  Heat support: %s", YESNO(this->supports_heat_));
   ESP_LOGCONFIG(TAG, "  Horizontal swing support: %s", YESNO(this->supports_horizontal_swing_));
   ESP_LOGCONFIG(TAG, "  Restore climate state after power loss: %s",
                 YESNO(this->restore_state_enabled_));
+  if (this->restore_state_switch_ != nullptr)
+    ESP_LOGCONFIG(TAG, "  Runtime restore switch: %s",
+                  ONOFF(this->restore_state_runtime_enabled_));
   ESP_LOGCONFIG(TAG, "  Temperature moving-average samples: %u", this->temperature_window_size_);
   ESP_LOGCONFIG(TAG, "  Status timeout: %" PRIu32 " ms", this->status_timeout_ms_);
   ESP_LOGCONFIG(TAG, "  Inter-byte timeout: %" PRIu32 " ms", this->inter_byte_timeout_ms_);
@@ -213,32 +229,103 @@ void TclClimate::handle_frame_(const uint8_t *data, const size_t length) {
     return;
   }
 
-  // The original, proven 35-byte component intentionally ignored command
-  // responses (type 0x03). Keep doing so without poisoning the last clean
-  // status: some indoor units echo such a response after a control command.
-  if (this->active_profile_ == TclProtocolProfile::PROFILE_TCL_35 &&
-      data[3] == 0x03) {
-    if (tcl_validate_status_frame(data, length, this->active_profile_, true))
+  // The legacy TCL/ElectriQ/Pioneer families use type 0x03 as a command
+  // response. Ignore it without poisoning the last clean status. The explicit
+  // TYJW2 and tclac profiles instead have captured status replies of type 0x03.
+  const bool profile_uses_type_03_status =
+      this->active_profile_ == TclProtocolProfile::PROFILE_TYJW2_35 ||
+      this->active_profile_ == TclProtocolProfile::PROFILE_TCLAC_38;
+  if (!profile_uses_type_03_status && data[3] == 0x03) {
+    const TclStatusSignature *signature =
+        this->status_signature_detector_.locked()
+            ? &this->status_signature_detector_.signature()
+            : nullptr;
+    if (tcl_validate_status_frame(data, length, this->active_profile_, true, signature))
       ESP_LOGVV(TAG, "Ignored valid TCL command response");
     else
       ESP_LOGW(TAG, "Ignored malformed TCL command response");
     return;
   }
 
-  TclProtocolState decoded{};
-  if (!tcl_decode_status_frame(data, length, decoded, this->active_profile_)) {
-    const uint8_t calculated = tcl_xor_checksum(data, length - 1);
-    ESP_LOGW(TAG, "Rejected TCL status for profile %s: received checksum 0x%02X, "
-                  "calculated 0x%02X",
-             tcl_protocol_profile_name(this->active_profile_), data[length - 1], calculated);
-    this->invalidate_status_("Rejected malformed or incompatible TCL status");
+  if (!this->status_signature_detector_.locked()) {
+    TclStatusSignature observed{};
+    if (!tcl_extract_status_signature(data, length, observed, this->active_profile_)) {
+      const uint8_t calculated = tcl_xor_checksum(data, length - 1);
+      ESP_LOGW(TAG,
+               "Rejected TCL heartbeat candidate for profile %s: size=%u prefix="
+               "%02X %02X %02X %02X %02X %02X %02X, received checksum 0x%02X, "
+               "calculated 0x%02X",
+               tcl_protocol_profile_name(this->active_profile_), static_cast<unsigned>(length),
+               data[0], data[1], data[2], data[3], data[4], data[5], data[6],
+               data[length - 1], calculated);
+      this->invalidate_status_("Rejected malformed or incompatible TCL heartbeat response");
+      return;
+    }
+
+    TclProtocolState candidate_state{};
+    if (!tcl_decode_status_frame(data, length, candidate_state, this->active_profile_, false,
+                                 &observed) ||
+        !tcl_status_state_is_plausible(candidate_state, this->active_profile_)) {
+      this->invalidate_status_("Rejected implausible TCL heartbeat state");
+      return;
+    }
+
+    if (!this->awaiting_response_) {
+      ESP_LOGVV(TAG, "Ignored valid TCL status candidate without a pending heartbeat");
+      return;
+    }
+
+    const bool signature_locked = this->status_signature_detector_.observe(observed);
+
+    // One heartbeat can provoke more than one identical frame.  Close this
+    // response window so confirmation must come from a later poll cycle.
+    this->awaiting_response_ = false;
+    if (!signature_locked) {
+      ESP_LOGD(TAG,
+               "Detected TCL status signature candidate: %u bytes, envelope="
+               "%02X %02X %02X %02X (%u/%u heartbeat confirmations)",
+               observed.frame_size, observed.byte_1, observed.byte_2,
+               observed.byte_5, observed.byte_6,
+               this->status_signature_detector_.candidate_count(),
+               TclStatusSignatureDetector::REQUIRED_CONFIRMATIONS);
+      return;
+    }
+
+    const auto &signature = this->status_signature_detector_.signature();
+    if (this->configured_status_frame_size_ == 0)
+      this->active_status_frame_size_ = signature.frame_size;
+    ESP_LOGI(TAG,
+             "Automatically locked TCL status length to %u bytes and response signature "
+             "to [1]=0x%02X [2]=0x%02X [5]=0x%02X [6]=0x%02X after %u heartbeat "
+             "confirmations",
+             signature.frame_size, signature.byte_1, signature.byte_2,
+             signature.byte_5, signature.byte_6,
+             TclStatusSignatureDetector::REQUIRED_CONFIRMATIONS);
+    this->publish_profile_state_();
+  } else if (!this->status_signature_detector_.matches(data, length)) {
+    const auto &signature = this->status_signature_detector_.signature();
+    ESP_LOGW(TAG,
+             "Ignored TCL status with a different locked signature: size=%u, envelope="
+             "%02X %02X %02X %02X (expected size=%u, envelope=%02X %02X %02X %02X)",
+             static_cast<unsigned>(length), data[1], data[2], data[5], data[6],
+             signature.frame_size, signature.byte_1, signature.byte_2,
+             signature.byte_5, signature.byte_6);
     return;
   }
 
-  if (this->active_status_frame_size_ == 0) {
-    this->active_status_frame_size_ = static_cast<uint8_t>(length);
-    ESP_LOGI(TAG, "Automatically locked TCL status length to %u bytes", length);
-    this->publish_profile_state_();
+  TclProtocolState decoded{};
+  if (!tcl_decode_status_frame(data, length, decoded, this->active_profile_, false,
+                               &this->status_signature_detector_.signature())) {
+    const uint8_t calculated = tcl_xor_checksum(data, length - 1);
+    ESP_LOGW(TAG,
+             "Rejected TCL status for profile %s: size=%u prefix="
+             "%02X %02X %02X %02X %02X %02X %02X, received checksum 0x%02X, "
+             "calculated 0x%02X",
+             tcl_protocol_profile_name(this->active_profile_), static_cast<unsigned>(length),
+             data[0], data[1], data[2], data[3], data[4], data[5], data[6],
+             data[length - 1], calculated);
+    this->invalidate_status_("Rejected malformed or incompatible TCL status");
+    return;
   }
 
   // The status message has no beep state. Preserve the local policy used for future commands.
@@ -492,6 +579,10 @@ void TclClimate::queue_switch_change(const TclSwitchType type, const bool state)
     case TclSwitchType::HEALTH_CONTROL:
       this->requested_state_.health = state;
       this->pending_fields_ |= PENDING_HEALTH;
+      break;
+    case TclSwitchType::RESTORE_STATE_CONTROL:
+      this->restore_state_runtime_enabled_ = state;
+      ESP_LOGI(TAG, "Persisted climate restore for the next boot: %s", ONOFF(state));
       break;
   }
 }

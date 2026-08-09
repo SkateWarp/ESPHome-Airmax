@@ -61,7 +61,9 @@ climate:
     # incompatible control frame could be unsafe for an unknown model.
     protocol_profile: tcl_35
 
-    # Passive startup detection of 61, 65 or 68-byte status responses.
+    # Startup detection of the model-specific RX signature and 61, 65 or
+    # 68-byte status length. Two separate heartbeat replies must agree before
+    # climate control is enabled.
     status_frame_length: auto
 
     # Restore mode, target, fan, swing and preset after a blackout.
@@ -90,6 +92,11 @@ switch:
       id: health_switch
       # Preserve the behavior of the previous configuration.
       restore_mode: ALWAYS_ON
+    restore_state:
+      name: Restore State After Power Loss
+      id: restore_state_switch
+      # Persist only actual switch changes; first boot defaults to enabled.
+      restore_mode: RESTORE_DEFAULT_ON
 
 binary_sensor:
   - platform: tcl_climate
