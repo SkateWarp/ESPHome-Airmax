@@ -240,6 +240,51 @@ bool tcl_supported_status_frame_size(const size_t length) {
          length == TCL_STATUS_FRAME_68_SIZE;
 }
 
+bool tcl_normalize_supply_voltage(const uint8_t raw, uint16_t &normalized,
+                                  const uint16_t *last_valid) {
+  const uint16_t direct = raw;
+  const uint16_t wrapped = static_cast<uint16_t>(raw) + 256U;
+  const auto is_plausible = [](const uint16_t value) {
+    return value >= TCL_SUPPLY_VOLTAGE_MIN && value <= TCL_SUPPLY_VOLTAGE_MAX;
+  };
+
+  const bool direct_is_plausible = is_plausible(direct);
+  const bool wrapped_is_plausible = is_plausible(wrapped);
+  if (raw == 0) {
+    // Zero is also a common "not measured" sentinel.  Interpret it as 256 V
+    // only when it continues a recent high-voltage reading; on a cold start
+    // or after a low-voltage sample, rejecting it is safer than inventing one.
+    if (last_valid == nullptr || !is_plausible(*last_valid))
+      return false;
+    const uint16_t distance =
+        wrapped > *last_valid ? wrapped - *last_valid : *last_valid - wrapped;
+    if (distance > TCL_SUPPLY_VOLTAGE_ZERO_WRAP_MAX_DELTA)
+      return false;
+    normalized = wrapped;
+    return true;
+  }
+  if (!direct_is_plausible && !wrapped_is_plausible)
+    return false;
+  if (direct_is_plausible != wrapped_is_plausible) {
+    normalized = direct_is_plausible ? direct : wrapped;
+    return true;
+  }
+
+  // A future profile may widen the accepted range enough for both encodings
+  // to fit.  Resolve that case only from a trustworthy previous sample; an
+  // absent, invalid or exactly equidistant reference remains ambiguous.
+  if (last_valid == nullptr || !is_plausible(*last_valid))
+    return false;
+  const uint16_t direct_distance =
+      direct > *last_valid ? direct - *last_valid : *last_valid - direct;
+  const uint16_t wrapped_distance =
+      wrapped > *last_valid ? wrapped - *last_valid : *last_valid - wrapped;
+  if (direct_distance == wrapped_distance)
+    return false;
+  normalized = direct_distance < wrapped_distance ? direct : wrapped;
+  return true;
+}
+
 bool tcl_extract_status_signature(const uint8_t *data, const size_t length,
                                   TclStatusSignature &signature,
                                   const TclProtocolProfile profile,
@@ -274,6 +319,8 @@ bool tcl_decode_status_frame(const uint8_t *data, const size_t length, TclProtoc
   if (!tcl_validate_status_frame(data, length, profile, accept_command_response, signature))
     return false;
 
+  const bool had_supply_voltage = state.supply_voltage_valid;
+  const uint16_t previous_supply_voltage = state.supply_voltage;
   TclProtocolState decoded{};
   decoded.mode = data[7] & 0x0F;
   decoded.power = (data[7] & 0x10) != 0;
@@ -306,7 +353,16 @@ bool tcl_decode_status_frame(const uint8_t *data, const size_t length, TclProtoc
   decoded.compressor_current = static_cast<float>(data[39]) / 10.0f;
   decoded.compressor_state = data[40];
   decoded.fault = data[44];
-  decoded.supply_voltage = data[45];
+  decoded.supply_voltage_valid = tcl_normalize_supply_voltage(
+      data[45], decoded.supply_voltage,
+      had_supply_voltage ? &previous_supply_voltage : nullptr);
+  if (!decoded.supply_voltage_valid && had_supply_voltage) {
+    // Reject only the bad sample.  Retaining the last accepted diagnostic
+    // lets the next wrapped reading use continuity without publishing a fake
+    // zero or implausible mid-range value.
+    decoded.supply_voltage = previous_supply_voltage;
+    decoded.supply_voltage_valid = true;
+  }
   decoded.outside_motor = data[46];
   // The extended TYJW2 captures use byte 50 differently; do not invent a filter bit there.
   decoded.clean_filter =

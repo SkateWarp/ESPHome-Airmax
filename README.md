@@ -20,10 +20,12 @@ features from related models explicit and optional.
 - Optional display, beep and health switches.
 - Diagnostic sensors exposed only when configured.
 - Safe state restoration after a blackout.
+- No captive portal or web server; configuration remains on the encrypted
+  native API and a bad Wi-Fi credential must be recovered over USB/serial.
 - Native ESPHome schemas: no `includes:` and no custom lambda.
 
 ESPHome 2026.5 or newer is required. The component and all three
-microcontroller variants were compiled with ESPHome 2026.7.2.
+microcontroller variants were compiled with ESPHome 2026.7.4.
 
 ## Quick start
 
@@ -172,6 +174,23 @@ No blind command is transmitted before the air conditioner responds. If three
 consecutive valid states do not reflect a command, the component accepts and
 publishes the appliance's real state instead of retrying forever.
 
+The UART is still sampled at the configured polling interval, but identical
+climate states are not sent to the native API on every frame. Discrete changes
+and availability transitions publish immediately, temperature-only changes are
+limited to once every five seconds, and an unchanged keepalive is published
+every 30 seconds. This keeps Home Assistant responsive while preventing a
+slow or congested API client from turning 500 ms TCL telemetry into an
+unbounded send backlog.
+
+The legacy TCL status protocol carries supply voltage in one byte. Values
+above 255 V therefore wrap modulo 256 (`7` means `263 V`). The component
+normalizes direct and wrapped candidates only inside a conservative
+`90–285 V` residential range. A candidate outside that range is not published;
+when a previous accepted sample is needed to disambiguate a future protocol
+variant, the nearest candidate wins and an unresolved tie is rejected. Raw
+zero is treated as a possible "no reading" sentinel and becomes 256 V only
+when it continues a nearby, previously accepted high-voltage sample.
+
 ESPHome compares the compact persistent state before touching flash. Repeated
 heartbeats and telemetry-only changes therefore do not produce physical flash
 writes when mode, target temperature, fan, swing and preset remain unchanged.
@@ -285,5 +304,5 @@ continued in
 ## Credentials
 
 Never commit `secrets.yaml`. The repository ignores it and includes only a
-placeholder template. Rotate any API, OTA, Wi-Fi or fallback-hotspot
-credentials that have previously been posted or committed.
+placeholder template. Rotate any API, OTA or Wi-Fi credentials that have
+previously been posted or committed.

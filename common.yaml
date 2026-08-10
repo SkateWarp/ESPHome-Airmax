@@ -22,6 +22,7 @@ uart:
 # USB_SERIAL_JTAG, but serial logging is disabled to keep the TCL bus clean.
 logger:
   baud_rate: 0
+  level: WARN
 
 # ESPHome batches preference writes and compares the persistent bytes before
 # touching flash. Unchanged heartbeats do not write; real changes within this
@@ -30,6 +31,10 @@ preferences:
   flash_write_interval: 1min
 
 api:
+  reboot_timeout: 0s
+  listen_backlog: 2
+  max_connections: 2
+  max_send_queue: 4
   encryption:
     key: !secret api_encryption_key
 
@@ -40,11 +45,6 @@ ota:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
-  ap:
-    ssid: "${friendly_name} Fallback Hotspot"
-    password: !secret fallback_ap_password
-
-captive_portal:
 
 climate:
   - platform: tcl_climate

@@ -21,6 +21,7 @@ using esphome::tcl_climate::TclStatusSignatureDetector;
 using esphome::tcl_climate::tcl_build_control_frame;
 using esphome::tcl_climate::tcl_decode_status_frame;
 using esphome::tcl_climate::tcl_extract_status_signature;
+using esphome::tcl_climate::tcl_normalize_supply_voltage;
 using esphome::tcl_climate::tcl_status_state_is_plausible;
 using esphome::tcl_climate::tcl_supported_status_frame_size;
 using esphome::tcl_climate::tcl_validate_status_frame;
@@ -139,7 +140,8 @@ int main() {
   require(state.pipe_out_temperature == 50 && state.pipe_in_temperature == 60,
           "raw pipe temperatures");
   require(state.compressor_state == 0x8A, "compressor state");
-  require(state.fault == 0xAB && state.supply_voltage == 230 &&
+  require(state.fault == 0xAB && state.supply_voltage_valid &&
+              state.supply_voltage == 230 &&
               state.outside_motor == 7,
           "diagnostics");
   require(state.clean_filter && state.vertical_vane_position == 3 &&
@@ -155,6 +157,62 @@ int main() {
           "decode 68-byte common prefix");
   require(extended_state.fan_speed == 118 && extended_state.fault == 0xAB,
           "extended frames keep common offsets");
+
+  uint16_t normalized_voltage = 0;
+  require(tcl_normalize_supply_voltage(230, normalized_voltage) &&
+              normalized_voltage == 230,
+          "ordinary 230 V sample remains direct");
+  require(tcl_normalize_supply_voltage(90, normalized_voltage) &&
+              normalized_voltage == 90,
+          "direct voltage accepts the documented lower boundary");
+  require(tcl_normalize_supply_voltage(7, normalized_voltage) &&
+              normalized_voltage == 263,
+          "one-byte voltage rollover maps 7 to 263 V");
+  require(tcl_normalize_supply_voltage(29, normalized_voltage) &&
+              normalized_voltage == 285,
+          "wrapped voltage accepts the documented upper boundary");
+  require(!tcl_normalize_supply_voltage(30, normalized_voltage),
+          "wrapped voltage above the documented boundary is rejected");
+  require(!tcl_normalize_supply_voltage(50, normalized_voltage),
+          "raw and wrapped values outside the residential range are rejected");
+  require(!tcl_normalize_supply_voltage(0, normalized_voltage),
+          "zero without history is rejected as an ambiguous sentinel");
+  const uint16_t previous_high_voltage = 230;
+  require(tcl_normalize_supply_voltage(0, normalized_voltage,
+                                       &previous_high_voltage) &&
+              normalized_voltage == 256,
+          "zero wraps to 256 only with close high-voltage continuity");
+  const uint16_t previous_low_voltage = 120;
+  require(!tcl_normalize_supply_voltage(0, normalized_voltage,
+                                        &previous_low_voltage),
+          "zero does not jump a low-voltage installation to 256 V");
+
+  auto wrapped_voltage = status;
+  wrapped_voltage[45] = 7;
+  wrapped_voltage.back() =
+      tcl_xor_checksum(wrapped_voltage.data(), wrapped_voltage.size() - 1);
+  require(tcl_decode_status_frame(wrapped_voltage.data(), wrapped_voltage.size(), state) &&
+              state.supply_voltage_valid && state.supply_voltage == 263,
+          "decoder carries a 230 to 263 V rollover transition");
+
+  auto invalid_voltage = status;
+  invalid_voltage[45] = 50;
+  invalid_voltage.back() =
+      tcl_xor_checksum(invalid_voltage.data(), invalid_voltage.size() - 1);
+  require(tcl_decode_status_frame(invalid_voltage.data(), invalid_voltage.size(), state) &&
+              state.supply_voltage_valid && state.supply_voltage == 263,
+          "invalid voltage sample preserves the last accepted reading");
+
+  TclProtocolState fresh_invalid_voltage{};
+  require(tcl_decode_status_frame(invalid_voltage.data(), invalid_voltage.size(),
+                                  fresh_invalid_voltage) &&
+              !fresh_invalid_voltage.supply_voltage_valid &&
+              fresh_invalid_voltage.supply_voltage == 0,
+          "invalid first voltage sample is not invented or published");
+
+  require(tcl_decode_status_frame(status.data(), status.size(), state) &&
+              state.supply_voltage_valid && state.supply_voltage == 230,
+          "valid voltage resumes after a rejected transition");
 
   auto command_response = status;
   command_response[3] = 0x03;

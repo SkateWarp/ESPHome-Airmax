@@ -17,6 +17,15 @@ static constexpr size_t TCL_CONTROL_FRAME_38_SIZE = 38;
 static constexpr size_t TCL_STATUS_REQUEST_SIZE = 8;
 static constexpr size_t TCL_MAX_FRAME_SIZE = 96;
 
+// Residential split systems are normally connected to 100/120/127 V or
+// 220/230/240 V mains.  Keep deliberately broad commissioning margins while
+// rejecting values that cannot represent a powered residential appliance.
+// The TCL status field is only one byte, so readings above 255 V arrive modulo
+// 256 (for example, raw 7 represents 263 V).
+static constexpr uint16_t TCL_SUPPLY_VOLTAGE_MIN = 90;
+static constexpr uint16_t TCL_SUPPLY_VOLTAGE_MAX = 285;
+static constexpr uint16_t TCL_SUPPLY_VOLTAGE_ZERO_WRAP_MAX_DELTA = 40;
+
 enum class TclProtocolProfile : uint8_t {
   PROFILE_TCL_35,
   PROFILE_ELECTRIQ_31,
@@ -49,7 +58,10 @@ struct TclProtocolState {
   float compressor_current{0.0f};
   uint8_t compressor_state{0};
   uint8_t fault{0};
-  uint8_t supply_voltage{0};
+  // Last accepted mains reading.  A rejected raw byte leaves an existing
+  // accepted value intact instead of publishing a fabricated diagnostic.
+  uint16_t supply_voltage{0};
+  bool supply_voltage_valid{false};
   uint8_t outside_motor{0};
   bool clean_filter{false};
   uint8_t vertical_vane_position{0};
@@ -144,6 +156,8 @@ uint8_t tcl_xor_checksum(const uint8_t *data, size_t length);
 const char *tcl_protocol_profile_name(TclProtocolProfile profile);
 float tcl_protocol_target_step(TclProtocolProfile profile);
 bool tcl_supported_status_frame_size(size_t length);
+bool tcl_normalize_supply_voltage(uint8_t raw, uint16_t &normalized,
+                                  const uint16_t *last_valid = nullptr);
 bool tcl_extract_status_signature(const uint8_t *data, size_t length,
                                   TclStatusSignature &signature,
                                   TclProtocolProfile profile = TclProtocolProfile::PROFILE_TCL_35,

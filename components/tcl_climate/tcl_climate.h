@@ -112,6 +112,7 @@ class TclClimate final : public climate::Climate,
   void apply_fields_(TclProtocolState &target, const TclProtocolState &source,
                      uint32_t fields) const;
   void publish_protocol_state_();
+  void publish_climate_state_(bool force = false);
   void publish_profile_state_();
   float add_temperature_sample_(float value);
   bool status_is_fresh_() const;
@@ -153,6 +154,8 @@ class TclClimate final : public climate::Climate,
 
   static constexpr uint32_t RESPONSE_WINDOW_MS = 400;
   static constexpr uint8_t MAX_COMMAND_CONFIRMATION_MISSES = 3;
+  static constexpr uint32_t CLIMATE_TEMPERATURE_PUBLISH_INTERVAL_MS = 5000;
+  static constexpr uint32_t CLIMATE_STATE_KEEPALIVE_MS = 30000;
   static constexpr uint32_t TCLAC_OFF_UNOBSERVABLE_FIELDS =
       PENDING_MODE | PENDING_FAN | PENDING_DISPLAY | PENDING_ECO |
       PENDING_TURBO | PENDING_HEALTH | PENDING_HORIZONTAL_SWING |
@@ -166,6 +169,16 @@ class TclClimate final : public climate::Climate,
   uint8_t temperature_sample_count_{0};
   uint8_t temperature_sample_index_{0};
   float temperature_sample_sum_{0.0f};
+
+  bool climate_state_published_{false};
+  uint32_t last_climate_publish_ms_{0};
+  climate::ClimateMode last_published_mode_{climate::CLIMATE_MODE_OFF};
+  climate::ClimateAction last_published_action_{climate::CLIMATE_ACTION_OFF};
+  climate::ClimateSwingMode last_published_swing_mode_{climate::CLIMATE_SWING_OFF};
+  optional<climate::ClimateFanMode> last_published_fan_mode_{};
+  optional<climate::ClimatePreset> last_published_preset_{};
+  float last_published_target_temperature_{0.0f};
+  float last_published_current_temperature_{0.0f};
 
   switch_::Switch *display_switch_{nullptr};
   switch_::Switch *beep_switch_{nullptr};

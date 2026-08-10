@@ -37,6 +37,13 @@ void publish_switch_if_changed(switch_::Switch *entity, const bool value) {
     entity->publish_state(value);
 }
 
+bool float_state_changed(const float previous, const float current,
+                         const float epsilon) {
+  if (std::isnan(previous) || std::isnan(current))
+    return std::isnan(previous) != std::isnan(current);
+  return std::fabs(previous - current) > epsilon;
+}
+
 }  // namespace
 
 void TclClimate::setup() {
@@ -75,11 +82,12 @@ void TclClimate::dump_config() {
   ESP_LOGCONFIG(TAG, "  Configured protocol profile: %s",
                 tcl_protocol_profile_name(this->configured_profile_));
   if (this->configured_status_frame_size_ == 0) {
-    if (this->active_status_frame_size_ == 0)
+    if (this->active_status_frame_size_ == 0) {
       ESP_LOGCONFIG(TAG, "  Status frame length: auto (waiting for first valid status)");
-    else
+    } else {
       ESP_LOGCONFIG(TAG, "  Status frame length: auto (locked to %u bytes)",
                     this->active_status_frame_size_);
+    }
   } else {
     ESP_LOGCONFIG(TAG, "  Status frame length: %u bytes",
                   this->configured_status_frame_size_);
@@ -98,9 +106,10 @@ void TclClimate::dump_config() {
   ESP_LOGCONFIG(TAG, "  Horizontal swing support: %s", YESNO(this->supports_horizontal_swing_));
   ESP_LOGCONFIG(TAG, "  Restore climate state after power loss: %s",
                 YESNO(this->restore_state_enabled_));
-  if (this->restore_state_switch_ != nullptr)
+  if (this->restore_state_switch_ != nullptr) {
     ESP_LOGCONFIG(TAG, "  Runtime restore switch: %s",
                   ONOFF(this->restore_state_runtime_enabled_));
+  }
   ESP_LOGCONFIG(TAG, "  Temperature moving-average samples: %u", this->temperature_window_size_);
   ESP_LOGCONFIG(TAG, "  Status timeout: %" PRIu32 " ms", this->status_timeout_ms_);
   ESP_LOGCONFIG(TAG, "  Inter-byte timeout: %" PRIu32 " ms", this->inter_byte_timeout_ms_);
@@ -176,7 +185,7 @@ void TclClimate::loop() {
     this->status_timed_out_ = true;
     this->status_set_warning();
     this->current_temperature = std::numeric_limits<float>::quiet_NaN();
-    this->publish_state();
+    this->publish_climate_state_(true);
     ESP_LOGW(TAG, "TCL status is stale; climate control is locked until a valid frame arrives");
   }
 }
@@ -313,7 +322,9 @@ void TclClimate::handle_frame_(const uint8_t *data, const size_t length) {
     return;
   }
 
-  TclProtocolState decoded{};
+  // Seed the decoder with the last accepted mains reading so an ambiguous or
+  // invalid one-byte voltage sample cannot replace a trustworthy value.
+  TclProtocolState decoded = this->state_;
   if (!tcl_decode_status_frame(data, length, decoded, this->active_profile_, false,
                                &this->status_signature_detector_.signature())) {
     const uint8_t calculated = tcl_xor_checksum(data, length - 1);
@@ -439,7 +450,7 @@ void TclClimate::invalidate_status_(const char *reason) {
     // Keep the last command state (including target) so persistence is not
     // overwritten with NaN merely because communication was interrupted.
     this->current_temperature = std::numeric_limits<float>::quiet_NaN();
-    this->publish_state();
+    this->publish_climate_state_(true);
   }
   ESP_LOGW(TAG, "%s; climate control is locked until a clean status arrives", reason);
 }
@@ -926,6 +937,50 @@ float TclClimate::add_temperature_sample_(const float value) {
   return this->temperature_sample_sum_ / static_cast<float>(this->temperature_sample_count_);
 }
 
+void TclClimate::publish_climate_state_(const bool force) {
+  const uint32_t now = millis();
+  const uint32_t since_last_publish = now - this->last_climate_publish_ms_;
+
+  const bool first_publish = !this->climate_state_published_;
+  const bool availability_changed =
+      !first_publish &&
+      (std::isnan(this->current_temperature) !=
+       std::isnan(this->last_published_current_temperature_));
+  const bool discrete_state_changed =
+      first_publish || availability_changed ||
+      this->mode != this->last_published_mode_ ||
+      this->action != this->last_published_action_ ||
+      this->fan_mode != this->last_published_fan_mode_ ||
+      this->preset != this->last_published_preset_ ||
+      this->swing_mode != this->last_published_swing_mode_ ||
+      float_state_changed(this->target_temperature,
+                          this->last_published_target_temperature_, 0.01f);
+  const bool temperature_changed =
+      first_publish ||
+      float_state_changed(this->current_temperature,
+                          this->last_published_current_temperature_, 0.09f);
+  const bool temperature_publish_due =
+      temperature_changed &&
+      (first_publish || since_last_publish >= CLIMATE_TEMPERATURE_PUBLISH_INTERVAL_MS);
+  const bool keepalive_due =
+      !first_publish && since_last_publish >= CLIMATE_STATE_KEEPALIVE_MS;
+
+  if (!force && !discrete_state_changed && !temperature_publish_due &&
+      !keepalive_due)
+    return;
+
+  this->publish_state();
+  this->climate_state_published_ = true;
+  this->last_climate_publish_ms_ = now;
+  this->last_published_mode_ = this->mode;
+  this->last_published_action_ = this->action;
+  this->last_published_fan_mode_ = this->fan_mode;
+  this->last_published_preset_ = this->preset;
+  this->last_published_swing_mode_ = this->swing_mode;
+  this->last_published_target_temperature_ = this->target_temperature;
+  this->last_published_current_temperature_ = this->current_temperature;
+}
+
 void TclClimate::publish_protocol_state_() {
   if (!this->state_.power) {
     this->mode = climate::CLIMATE_MODE_OFF;
@@ -1036,7 +1091,8 @@ void TclClimate::publish_protocol_state_() {
     publish_switch_if_changed(this->health_switch_, this->state_.health);
 
   publish_sensor_if_changed(this->current_sensor_, this->state_.compressor_current, 0.01f);
-  publish_sensor_if_changed(this->supply_voltage_sensor_, this->state_.supply_voltage);
+  if (this->state_.supply_voltage_valid)
+    publish_sensor_if_changed(this->supply_voltage_sensor_, this->state_.supply_voltage);
   publish_sensor_if_changed(this->pipe_in_temperature_sensor_,
                             static_cast<float>(static_cast<int>(this->state_.pipe_in_temperature) - 32));
   publish_sensor_if_changed(this->pipe_out_temperature_sensor_,
@@ -1074,7 +1130,7 @@ void TclClimate::publish_protocol_state_() {
       this->deep_sleep_active_low_ ? !this->state_.deep_sleep_bit : this->state_.deep_sleep_bit;
   publish_binary_if_changed(this->deep_sleep_binary_sensor_, deep_sleep);
   publish_binary_if_changed(this->clean_filter_binary_sensor_, this->state_.clean_filter);
-  this->publish_state();
+  this->publish_climate_state_();
 }
 
 void TclClimate::publish_profile_state_() {
