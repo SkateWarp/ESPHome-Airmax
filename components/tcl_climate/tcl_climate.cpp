@@ -8,6 +8,8 @@
 #include <string>
 
 #include "esphome/core/log.h"
+#include "esphome/core/preferences.h"
+#include "tcl_state_policy.h"
 
 namespace esphome::tcl_climate {
 
@@ -33,8 +35,14 @@ void publish_text_if_changed(text_sensor::TextSensor *entity, const char *value)
 }
 
 void publish_switch_if_changed(switch_::Switch *entity, const bool value) {
-  if (entity != nullptr && (!entity->has_state() || entity->state != value))
-    entity->publish_state(value);
+  if (entity == nullptr ||
+      !tcl_switch_state_changed(entity->has_state(), entity->state, value))
+    return;
+
+  entity->publish_state(value);
+  if ((entity->restore_mode & switch_::RESTORE_MODE_PERSISTENT_MASK) &&
+      global_preferences != nullptr)
+    global_preferences->sync();
 }
 
 bool float_state_changed(const float previous, const float current,
@@ -1083,12 +1091,18 @@ void TclClimate::publish_protocol_state_() {
   this->target_temperature = this->state_.target_temperature;
   this->current_temperature = this->state_.current_temperature;
 
-  if (!(this->pending_fields_ & PENDING_DISPLAY) &&
+  // Do not let a stale status frame overwrite a persisted user choice while
+  // that choice is queued or still waiting for command confirmation.
+  if (tcl_uart_state_can_replace_switch_intent(
+          this->pending_fields_, this->awaiting_command_fields_, PENDING_DISPLAY) &&
       (!tclac_profile || this->state_.power))
     publish_switch_if_changed(this->display_switch_, this->state_.display);
   if ((this->state_.power || tclac_profile) &&
-      !(this->pending_fields_ & PENDING_HEALTH))
+      tcl_uart_state_can_replace_switch_intent(
+          this->pending_fields_, this->awaiting_command_fields_, PENDING_HEALTH))
     publish_switch_if_changed(this->health_switch_, this->state_.health);
+  // Beep is absent from TCL status frames and intentionally never follows
+  // UART state; its local persisted switch value remains authoritative.
 
   publish_sensor_if_changed(this->current_sensor_, this->state_.compressor_current, 0.01f);
   if (this->state_.supply_voltage_valid)

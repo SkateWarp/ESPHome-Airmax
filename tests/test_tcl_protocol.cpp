@@ -6,6 +6,7 @@
 #include <iostream>
 
 #include "../components/tcl_climate/tcl_protocol.h"
+#include "../components/tcl_climate/tcl_state_policy.h"
 
 using esphome::tcl_climate::TCL_STATUS_FRAME_61_SIZE;
 using esphome::tcl_climate::TCL_STATUS_FRAME_65_SIZE;
@@ -24,6 +25,8 @@ using esphome::tcl_climate::tcl_extract_status_signature;
 using esphome::tcl_climate::tcl_normalize_supply_voltage;
 using esphome::tcl_climate::tcl_status_state_is_plausible;
 using esphome::tcl_climate::tcl_supported_status_frame_size;
+using esphome::tcl_climate::tcl_switch_state_changed;
+using esphome::tcl_climate::tcl_uart_state_can_replace_switch_intent;
 using esphome::tcl_climate::tcl_validate_status_frame;
 using esphome::tcl_climate::tcl_xor_checksum;
 
@@ -106,6 +109,28 @@ bool control_equals(const TclControlFrame &actual, const std::array<uint8_t, N> 
 }  // namespace
 
 int main() {
+  require(tcl_switch_state_changed(false, false, false),
+          "the first published switch value is a real state");
+  require(!tcl_switch_state_changed(true, true, true),
+          "an identical switch heartbeat is deduplicated");
+  require(tcl_switch_state_changed(true, true, false),
+          "a changed switch value is persisted");
+
+  constexpr uint32_t pending_display = 1U << 4;
+  constexpr uint32_t pending_health = 1U << 7;
+  constexpr uint32_t pending_beep = 1U << 12;
+  require(tcl_uart_state_can_replace_switch_intent(0, 0, pending_display),
+          "idle UART status may refresh a switch");
+  require(!tcl_uart_state_can_replace_switch_intent(
+              pending_display, 0, pending_display),
+          "queued display intent blocks stale UART publication");
+  require(!tcl_uart_state_can_replace_switch_intent(
+              0, pending_health, pending_health),
+          "unconfirmed health intent blocks stale UART publication");
+  require(tcl_uart_state_can_replace_switch_intent(
+              pending_beep, 0, pending_display),
+          "an unrelated write-only beep intent does not block display status");
+
   const std::array<uint8_t, 8> expected_request{
       0xBB, 0x00, 0x01, 0x04, 0x02, 0x01, 0x00, 0xBD,
   };
@@ -126,11 +151,13 @@ int main() {
   require(!tcl_validate_status_frame(status.data(), status.size() - 1), "short status rejected");
 
   TclProtocolState state{};
+  state.beep = true;
   require(tcl_decode_status_frame(status.data(), status.size(), state), "decode valid status");
   require(state.power && state.mode == 0x01, "power and cool mode");
   require(std::fabs(state.target_temperature - 22.0f) < 0.001f, "target temperature");
   require(state.fan == 0x02, "fan code");
   require(state.display && state.eco && state.turbo && state.health, "feature bits");
+  require(!state.beep, "status decoder does not invent a write-only beep value");
   require(state.horizontal_swing && state.vertical_swing, "swing bits");
   require(state.sleep && state.deep_sleep_bit && state.mute, "sleep/mute bits");
   require(std::fabs(state.current_temperature - 10.0f) < 0.001f,

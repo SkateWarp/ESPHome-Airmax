@@ -40,11 +40,13 @@ switch:
     tcl_climate_id: test_climate
     display:
       name: Display
+      restore_mode: RESTORE_DEFAULT_ON
     beep:
       name: Beep
+      restore_mode: RESTORE_DEFAULT_OFF
     health:
       name: Health
-      restore_mode: ALWAYS_ON
+      restore_mode: RESTORE_DEFAULT_ON
 
 sensor:
   - platform: tcl_climate

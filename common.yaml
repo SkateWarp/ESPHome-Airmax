@@ -24,9 +24,9 @@ logger:
   baud_rate: 0
   level: WARN
 
-# ESPHome batches preference writes and compares the persistent bytes before
-# touching flash. Unchanged heartbeats do not write; real changes within this
-# window are coalesced while keeping blackout recovery reasonably short.
+# ESPHome batches climate preference writes and compares the persistent bytes
+# before touching flash. The three rare control switches flush real changes
+# immediately; unchanged UART heartbeats still do not write.
 preferences:
   flash_write_interval: 1min
 
@@ -84,14 +84,18 @@ switch:
     display:
       name: Display Switch
       id: disp_switch
+      # Restore the last choice; first boot defaults to the display on.
+      restore_mode: RESTORE_DEFAULT_ON
     beep:
       name: Beep Switch
       id: beep_switch
+      # Beep is write-only in status frames, so its saved policy is authoritative.
+      restore_mode: RESTORE_DEFAULT_OFF
     health:
       name: Health Switch
       id: health_switch
-      # Preserve the behavior of the previous configuration.
-      restore_mode: ALWAYS_ON
+      # Preserve the previous first-boot default, then remember later changes.
+      restore_mode: RESTORE_DEFAULT_ON
     restore_state:
       name: Restore State After Power Loss
       id: restore_state_switch

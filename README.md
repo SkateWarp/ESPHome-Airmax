@@ -17,7 +17,7 @@ features from related models explicit and optional.
 - Explicit 31, 35 and 38-byte TX protocol profiles.
 - Climate mode, target temperature, fan, vertical swing, presets and action.
 - Optional Heat and horizontal swing support.
-- Optional display, beep and health switches.
+- Optional display, beep and health switches with persistent state.
 - Diagnostic sensors exposed only when configured.
 - Safe state restoration after a blackout.
 - No captive portal or web server; configuration remains on the encrypted
@@ -132,7 +132,7 @@ AWTBE12-C2 implementation without hardware validation.
 
 ## Blackout state restoration
 
-The supplied configuration enables compact native ESPHome climate
+The supplied configuration enables compact native ESPHome climate and switch
 preferences:
 
 ```yaml
@@ -146,6 +146,15 @@ climate:
 switch:
   - platform: tcl_climate
     tcl_climate_id: tcl_instance
+    display:
+      name: Display Switch
+      restore_mode: RESTORE_DEFAULT_ON
+    beep:
+      name: Beep Switch
+      restore_mode: RESTORE_DEFAULT_OFF
+    health:
+      name: Health Switch
+      restore_mode: RESTORE_DEFAULT_ON
     restore_state:
       name: Restore State After Power Loss
       restore_mode: RESTORE_DEFAULT_ON
@@ -159,6 +168,17 @@ returns, the component:
 3. waits for a fresh, valid appliance response;
 4. sends one combined restore command;
 5. waits for a new status frame that confirms the observable fields.
+
+Display, beep and health also restore their last saved values. On a device with
+no saved preferences yet, the defaults are display ON, beep OFF and health ON.
+These three switches restore independently from the climate restore gate.
+Display and health are later reconciled with confirmed appliance status, but a
+stale status received while their command is queued or awaiting confirmation
+cannot overwrite the saved intent. Beep is write-only in the known status
+frames, so its persisted local value remains authoritative. A real switch
+change from the native API is synchronized to flash immediately; a real display
+or health change observed from UART is synchronized the same way. Identical
+status heartbeats are deduplicated and do not trigger a sync.
 
 The optional restore switch is a runtime gate for the next boot. It defaults
 to ON, remembers only real ON/OFF changes through ESPHome preferences, and can
@@ -193,13 +213,16 @@ when it continues a nearby, previously accepted high-voltage sample.
 
 ESPHome compares the compact persistent state before touching flash. Repeated
 heartbeats and telemetry-only changes therefore do not produce physical flash
-writes when mode, target temperature, fan, swing and preset remain unchanged.
-The one-minute interval also coalesces multiple real changes into one pending
-state, further reducing flash wear.
+writes when the climate and switch values remain unchanged. The one-minute
+interval coalesces multiple climate changes into pending state, further
+reducing flash wear; display, beep and health are deliberately flushed
+immediately because they change rarely.
 
-A power cut immediately after a real change can therefore restore the
-preceding state. Change the interval to `10s` if a shorter recovery window is
-more important than minimizing flash activity.
+A power cut immediately after a real climate change can therefore restore the
+preceding climate state. Change the interval to `10s` if a shorter climate
+recovery window is more important than minimizing flash activity. Display,
+beep, health and the restore-gate switch do not share that delay: their real
+changes are flushed immediately.
 
 On ESP32 and ESP32-C3, the final pending state is compared byte-for-byte with
 NVS when the interval expires. ESP8266 compares updates with its flash-backed
