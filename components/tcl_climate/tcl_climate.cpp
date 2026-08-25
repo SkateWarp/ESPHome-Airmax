@@ -352,17 +352,10 @@ void TclClimate::handle_frame_(const uint8_t *data, const size_t length) {
 
   const bool tclac_profile =
       this->active_profile_ == TclProtocolProfile::PROFILE_TCLAC_38;
-  if (tclac_profile && decoded.power && this->deferred_fields_ != 0 &&
-      !(this->awaiting_command_status_ && this->awaiting_deferred_fields_ != 0)) {
-    // The unit was turned on outside this component. Queue the preferences
-    // selected while it was OFF before the fresh ON status overwrites state_.
-    const uint32_t deferred_without_newer_request =
-        this->deferred_fields_ & ~this->pending_fields_;
-    this->apply_fields_(this->requested_state_, this->state_,
-                        deferred_without_newer_request);
-    this->pending_fields_ |= this->deferred_fields_;
-    ESP_LOGD(TAG, "Queued deferred TCLAC OFF-state preferences after external power-on");
-  }
+  const bool two_phase_profile =
+      this->active_profile_ == TclProtocolProfile::PROFILE_TCL_35 ||
+      tclac_profile;
+  const bool previous_confirmed_power = this->last_confirmed_power_;
 
   if (tclac_profile && !decoded.power) {
     // tclac does not expose these controls in an OFF response. Keep their
@@ -393,7 +386,21 @@ void TclClimate::handle_frame_(const uint8_t *data, const size_t length) {
 
   decoded.current_temperature = this->add_temperature_sample_(decoded.current_temperature);
   bool command_rejected = false;
-  if (this->awaiting_command_status_) {
+  if (this->awaiting_command_status_ &&
+      tcl_phase_b_interrupted_by_power_off(
+          decoded.power, this->awaiting_deferred_fields_)) {
+    // POWER is part of every phase-B confirmation.  An OFF report therefore
+    // means the appliance was turned off while preferences were being
+    // applied, not that false-valued preferences were accepted.  Cancel this
+    // attempt immediately and retain deferred_fields_ for the next ON edge.
+    this->awaiting_deferred_fields_ = 0;
+    this->awaiting_command_status_ = false;
+    this->awaiting_command_fields_ = 0;
+    this->awaiting_command_observable_fields_ = 0;
+    this->command_confirmation_misses_ = 0;
+    ESP_LOGD(TAG, "Phase-B preference confirmation interrupted by power-off; "
+                  "preferences remain deferred");
+  } else if (this->awaiting_command_status_) {
     if (this->status_confirms_command_(decoded)) {
       const bool retained_local_policy =
           this->awaiting_command_observable_fields_ != this->awaiting_command_fields_;
@@ -432,7 +439,36 @@ void TclClimate::handle_frame_(const uint8_t *data, const size_t length) {
     }
   }
 
+  uint32_t configured_sticky_fields = 0;
+  if (two_phase_profile) {
+    if (this->display_switch_ != nullptr && this->display_switch_->has_state())
+      configured_sticky_fields |= PENDING_DISPLAY;
+    if (this->health_switch_ != nullptr && this->health_switch_->has_state())
+      configured_sticky_fields |= PENDING_HEALTH;
+  }
+  const uint32_t sticky_fields =
+      tcl_sticky_fields_for_power_off(previous_confirmed_power, decoded.power,
+                                      configured_sticky_fields) |
+      tcl_sticky_fields_for_power_on(previous_confirmed_power, decoded.power,
+                                     configured_sticky_fields);
+  if ((sticky_fields & PENDING_DISPLAY) != 0)
+    this->requested_state_.display = this->display_switch_->state;
+  if ((sticky_fields & PENDING_HEALTH) != 0)
+    this->requested_state_.health = this->health_switch_->state;
+  this->deferred_fields_ |= sticky_fields;
+
   this->state_ = decoded;
+  this->last_confirmed_power_ = decoded.power;
+
+  if (tcl_should_queue_deferred_fields_after_power_on(
+          decoded.power, this->deferred_fields_,
+          this->awaiting_command_status_, command_rejected)) {
+    // Phase B starts from this freshly reported ON state and overlays only
+    // preferences explicitly selected during the preceding OFF epoch plus
+    // the configured sticky display/health policies.
+    this->pending_fields_ |= this->deferred_fields_;
+    ESP_LOGD(TAG, "Queued phase-B OFF-state preferences after confirmed power-on");
+  }
   this->has_valid_status_ = true;
   this->status_timed_out_ = false;
   this->awaiting_response_ = false;
@@ -474,8 +510,41 @@ bool TclClimate::send_pending_command_() {
   if (this->pending_fields_ == 0 || !this->status_is_fresh_())
     return false;
 
+  const bool two_phase_profile =
+      this->active_profile_ == TclProtocolProfile::PROFILE_TCL_35 ||
+      this->active_profile_ == TclProtocolProfile::PROFILE_TCLAC_38;
+  const bool off_epoch_active = this->off_epoch_active_();
+  if (two_phase_profile) {
+    // Capture against confirmed/pending command intent, not state_: state_ is
+    // updated optimistically after TX.  This also covers an OFF command that
+    // is queued or awaiting its first UART confirmation.
+    this->deferred_fields_ |= tcl_capture_off_deferred_fields(
+        off_epoch_active, this->pending_fields_,
+        this->pending_off_reset_fields_, OFF_DEFERABLE_FIELDS);
+  }
+
   TclProtocolState command_state = this->state_;
   this->apply_pending_fields_(command_state);
+
+  const bool power_on_phase_a =
+      two_phase_profile && off_epoch_active && command_state.power &&
+      this->deferred_fields_ != 0;
+  if (this->active_profile_ == TclProtocolProfile::PROFILE_TCLAC_38 &&
+      power_on_phase_a) {
+    // tclac retains OFF-hidden fields in state_ for normal compatibility.
+    // Do not let an old Sleep/Eco/Diffuse/fan/swing policy hitch a ride on the
+    // power-on transaction.  Explicit OFF-epoch choices are still retained in
+    // requested_state_ and are always re-applied from the fresh ON state in B.
+    uint32_t safe_fields = TCLAC_PHASE_A_SAFE_FIELDS;
+    if (this->display_switch_ == nullptr)
+      safe_fields |= PENDING_DISPLAY;
+    if (this->health_switch_ == nullptr)
+      safe_fields |= PENDING_HEALTH;
+    const TclProtocolState safe_state{};
+    this->apply_fields_(
+        command_state, safe_state,
+        tcl_tclac_phase_a_safe_fields(true, power_on_phase_a, safe_fields));
+  }
 
   // These three controls are represented by child entities in the original component.
   // Their current UI state remains the source of truth when they are configured.
@@ -489,6 +558,19 @@ bool TclClimate::send_pending_command_() {
       this->health_switch_ != nullptr && this->health_switch_->has_state())
     command_state.health = this->health_switch_->state;
 
+  const uint32_t phase_b_fields =
+      two_phase_profile && !power_on_phase_a && command_state.power
+          ? this->pending_fields_ & this->deferred_fields_
+          : 0;
+  const bool suppress_internal_deferred_beep =
+      two_phase_profile && tcl_should_suppress_internal_deferred_beep(
+                               phase_b_fields, this->pending_fields_,
+                               this->deferred_fields_,
+                               PENDING_BEEP);
+  const bool local_beep_policy = command_state.beep;
+  if (suppress_internal_deferred_beep)
+    command_state.beep = false;
+
   TclControlFrame frame{};
   if (!tcl_build_control_frame(command_state, this->active_profile_, frame)) {
     ESP_LOGW(TAG, "Control remains queued: current TCL mode or fan code is not safely mappable");
@@ -497,22 +579,15 @@ bool TclClimate::send_pending_command_() {
 
   this->write_array(frame.bytes.data(), frame.size);
   this->awaiting_command_state_ = command_state;
-  uint32_t command_fields = this->pending_fields_;
-  this->awaiting_deferred_fields_ = 0;
-  if (this->active_profile_ == TclProtocolProfile::PROFILE_TCLAC_38) {
-    if (command_state.power) {
-      // Preferences selected while OFF are encoded by every ON frame. Include
-      // them in this command's confirmation even if POWER/MODE was the only
-      // new ClimateCall.
-      this->awaiting_deferred_fields_ = this->deferred_fields_;
-      command_fields |= this->deferred_fields_;
-      if (this->awaiting_deferred_fields_ != 0)
-        command_fields |= PENDING_POWER;
-    } else {
-      this->deferred_fields_ |=
-          this->pending_fields_ & TCLAC_OFF_UNOBSERVABLE_FIELDS;
-    }
-  }
+  uint32_t command_fields =
+      two_phase_profile
+          ? tcl_command_confirmation_fields(
+                power_on_phase_a, this->pending_fields_,
+                POWER_ON_PHASE_A_FIELDS)
+          : this->pending_fields_;
+  if (phase_b_fields != 0)
+    command_fields |= PENDING_POWER;
+  this->awaiting_deferred_fields_ = phase_b_fields;
   this->awaiting_command_fields_ = command_fields;
   this->awaiting_command_observable_fields_ =
       command_fields & ~static_cast<uint32_t>(PENDING_BEEP);
@@ -524,15 +599,25 @@ bool TclClimate::send_pending_command_() {
     this->awaiting_command_observable_fields_ &=
         ~TCLAC_OFF_UNOBSERVABLE_FIELDS;
   }
+  if (two_phase_profile && !command_state.power) {
+    // A selection made during OFF remains pending for phase B even if this
+    // profile happens to echo it before power-on.
+    this->awaiting_command_observable_fields_ &=
+        ~this->deferred_fields_;
+  }
   this->state_ = command_state;
+  if (suppress_internal_deferred_beep)
+    this->state_.beep = local_beep_policy;
   this->pending_fields_ = 0;
   this->pending_off_reset_fields_ = 0;
   this->last_tx_ms_ = millis();
   this->awaiting_response_ = true;
   this->awaiting_command_status_ = true;
   this->command_confirmation_misses_ = 0;
-  ESP_LOGD(TAG, "TX combined control command (%u bytes, profile %s, checksum 0x%02X)",
+  ESP_LOGD(TAG,
+           "TX combined control command (%u bytes, profile %s, phase %s, checksum 0x%02X)",
            frame.size, tcl_protocol_profile_name(this->active_profile_),
+           power_on_phase_a ? "power-on A" : phase_b_fields != 0 ? "preferences B" : "normal",
            frame.bytes[frame.size - 1]);
   return true;
 }
@@ -585,24 +670,44 @@ bool TclClimate::status_confirms_command_(const TclProtocolState &state) const {
   return true;
 }
 
+bool TclClimate::off_epoch_active_() const {
+  return tcl_effective_off_epoch(
+      this->last_confirmed_power_, this->pending_fields_,
+      this->requested_state_.power, this->awaiting_command_fields_,
+      this->awaiting_command_state_.power, PENDING_POWER);
+}
+
 void TclClimate::queue_switch_change(const TclSwitchType type, const bool state) {
+  uint32_t requested_field = 0;
   switch (type) {
     case TclSwitchType::DISPLAY_CONTROL:
       this->requested_state_.display = state;
       this->pending_fields_ |= PENDING_DISPLAY;
+      requested_field = PENDING_DISPLAY;
       break;
     case TclSwitchType::BEEP_CONTROL:
       this->requested_state_.beep = state;
       this->pending_fields_ |= PENDING_BEEP;
+      requested_field = PENDING_BEEP;
       break;
     case TclSwitchType::HEALTH_CONTROL:
       this->requested_state_.health = state;
       this->pending_fields_ |= PENDING_HEALTH;
+      requested_field = PENDING_HEALTH;
       break;
     case TclSwitchType::RESTORE_STATE_CONTROL:
       this->restore_state_runtime_enabled_ = state;
       ESP_LOGI(TAG, "Persisted climate restore for the next boot: %s", ONOFF(state));
       break;
+  }
+
+  const bool two_phase_profile =
+      this->active_profile_ == TclProtocolProfile::PROFILE_TCL_35 ||
+      this->active_profile_ == TclProtocolProfile::PROFILE_TCLAC_38;
+  if (two_phase_profile) {
+    this->deferred_fields_ |= tcl_capture_off_deferred_fields(
+        this->off_epoch_active_(), requested_field, 0,
+        OFF_DEFERABLE_FIELDS);
   }
 }
 
@@ -889,6 +994,15 @@ void TclClimate::control(const climate::ClimateCall &call) {
                              PENDING_TURBO | PENDING_ECO;
     this->pending_off_reset_fields_ |= LEGACY_OFF_RESET_FIELDS;
   }
+
+  const bool two_phase_profile =
+      this->active_profile_ == TclProtocolProfile::PROFILE_TCL_35 ||
+      this->active_profile_ == TclProtocolProfile::PROFILE_TCLAC_38;
+  if (two_phase_profile) {
+    this->deferred_fields_ |= tcl_capture_off_deferred_fields(
+        this->off_epoch_active_(), this->pending_fields_,
+        this->pending_off_reset_fields_, OFF_DEFERABLE_FIELDS);
+  }
 }
 
 void TclClimate::apply_pending_fields_(TclProtocolState &state) const {
@@ -990,6 +1104,21 @@ void TclClimate::publish_climate_state_(const bool force) {
 }
 
 void TclClimate::publish_protocol_state_() {
+  TclProtocolState visible_state = this->state_;
+  const auto visible_layers = tcl_visible_intent_layers(
+      this->pending_fields_, this->awaiting_command_fields_,
+      this->deferred_fields_, OFF_DEFERABLE_FIELDS);
+  // Keep the newest user-visible option through the first two old UART
+  // reports.  Layer order is intentional: physical -> in-flight command ->
+  // OFF-epoch preference -> newer queued request.  On the third rejection the
+  // awaiting/deferred masks are cleared before this function, so UART wins.
+  this->apply_fields_(visible_state, this->awaiting_command_state_,
+                      visible_layers.awaiting_fields);
+  this->apply_fields_(visible_state, this->requested_state_,
+                      visible_layers.deferred_fields);
+  this->apply_fields_(visible_state, this->requested_state_,
+                      visible_layers.pending_fields);
+
   if (!this->state_.power) {
     this->mode = climate::CLIMATE_MODE_OFF;
   } else {
@@ -1034,72 +1163,74 @@ void TclClimate::publish_protocol_state_() {
   const bool tclac_profile =
       this->active_profile_ == TclProtocolProfile::PROFILE_TCLAC_38;
   if (tclac_profile) {
-    if (this->state_.eco)
+    if (visible_state.eco)
       this->preset = climate::CLIMATE_PRESET_ECO;
-    else if (this->health_switch_ == nullptr && this->state_.health)
+    else if (this->health_switch_ == nullptr && visible_state.health)
       this->preset = climate::CLIMATE_PRESET_COMFORT;
-    else if (this->state_.sleep)
+    else if (visible_state.sleep)
       this->preset = climate::CLIMATE_PRESET_SLEEP;
     else
       this->preset = climate::CLIMATE_PRESET_NONE;
   } else {
-    if (this->state_.turbo)
+    if (visible_state.turbo)
       this->preset = climate::CLIMATE_PRESET_BOOST;
-    else if (this->state_.sleep)
+    else if (visible_state.sleep)
       this->preset = climate::CLIMATE_PRESET_SLEEP;
-    else if (this->state_.eco)
+    else if (visible_state.eco)
       this->preset = climate::CLIMATE_PRESET_ECO;
     else
       this->preset = climate::CLIMATE_PRESET_NONE;
   }
 
-  if (this->state_.mute) {
+  if (visible_state.mute) {
     this->fan_mode = climate::CLIMATE_FAN_QUIET;
-  } else if (tclac_profile && this->state_.turbo) {
+  } else if (tclac_profile && visible_state.turbo) {
     this->fan_mode = climate::CLIMATE_FAN_DIFFUSE;
-  } else if (this->state_.fan == 0x00) {
+  } else if (visible_state.fan == 0x00) {
     this->fan_mode = climate::CLIMATE_FAN_AUTO;
-  } else if (this->state_.fan == 0x01) {
+  } else if (visible_state.fan == 0x01) {
     this->fan_mode = climate::CLIMATE_FAN_LOW;
-  } else if (this->state_.fan == 0x02) {
+  } else if (visible_state.fan == 0x02) {
     this->fan_mode = climate::CLIMATE_FAN_MEDIUM;
-  } else if (this->state_.fan == 0x03) {
+  } else if (visible_state.fan == 0x03) {
     this->fan_mode =
         tclac_profile ? climate::CLIMATE_FAN_FOCUS : climate::CLIMATE_FAN_HIGH;
-  } else if (tclac_profile && this->state_.fan == 0x04) {
+  } else if (tclac_profile && visible_state.fan == 0x04) {
     this->fan_mode = climate::CLIMATE_FAN_MIDDLE;
-  } else if (tclac_profile && this->state_.fan == 0x05) {
+  } else if (tclac_profile && visible_state.fan == 0x05) {
     this->fan_mode = climate::CLIMATE_FAN_HIGH;
   } else {
-    ESP_LOGW(TAG, "Unknown TCL status fan code 0x%02X", this->state_.fan);
+    ESP_LOGW(TAG, "Unknown TCL visible fan code 0x%02X", visible_state.fan);
   }
 
   if (this->supports_horizontal_swing_) {
-    if (this->state_.vertical_swing && this->state_.horizontal_swing)
+    if (visible_state.vertical_swing && visible_state.horizontal_swing)
       this->swing_mode = climate::CLIMATE_SWING_BOTH;
-    else if (this->state_.vertical_swing)
+    else if (visible_state.vertical_swing)
       this->swing_mode = climate::CLIMATE_SWING_VERTICAL;
-    else if (this->state_.horizontal_swing)
+    else if (visible_state.horizontal_swing)
       this->swing_mode = climate::CLIMATE_SWING_HORIZONTAL;
     else
       this->swing_mode = climate::CLIMATE_SWING_OFF;
   } else {
     this->swing_mode =
-        this->state_.vertical_swing ? climate::CLIMATE_SWING_VERTICAL : climate::CLIMATE_SWING_OFF;
+        visible_state.vertical_swing ? climate::CLIMATE_SWING_VERTICAL : climate::CLIMATE_SWING_OFF;
   }
 
-  this->target_temperature = this->state_.target_temperature;
+  this->target_temperature = visible_state.target_temperature;
   this->current_temperature = this->state_.current_temperature;
 
   // Do not let a stale status frame overwrite a persisted user choice while
   // that choice is queued or still waiting for command confirmation.
   if (tcl_uart_state_can_replace_switch_intent(
-          this->pending_fields_, this->awaiting_command_fields_, PENDING_DISPLAY) &&
+          this->pending_fields_, this->awaiting_command_fields_,
+          this->deferred_fields_, PENDING_DISPLAY) &&
       (!tclac_profile || this->state_.power))
     publish_switch_if_changed(this->display_switch_, this->state_.display);
   if ((this->state_.power || tclac_profile) &&
       tcl_uart_state_can_replace_switch_intent(
-          this->pending_fields_, this->awaiting_command_fields_, PENDING_HEALTH))
+          this->pending_fields_, this->awaiting_command_fields_,
+          this->deferred_fields_, PENDING_HEALTH))
     publish_switch_if_changed(this->health_switch_, this->state_.health);
   // Beep is absent from TCL status frames and intentionally never follows
   // UART state; its local persisted switch value remains authoritative.

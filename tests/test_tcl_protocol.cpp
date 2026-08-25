@@ -20,14 +20,25 @@ using esphome::tcl_climate::TclProtocolState;
 using esphome::tcl_climate::TclStatusSignature;
 using esphome::tcl_climate::TclStatusSignatureDetector;
 using esphome::tcl_climate::tcl_build_control_frame;
+using esphome::tcl_climate::tcl_capture_off_deferred_fields;
+using esphome::tcl_climate::tcl_command_confirmation_fields;
 using esphome::tcl_climate::tcl_decode_status_frame;
+using esphome::tcl_climate::tcl_effective_off_epoch;
 using esphome::tcl_climate::tcl_extract_status_signature;
 using esphome::tcl_climate::tcl_normalize_supply_voltage;
+using esphome::tcl_climate::tcl_phase_b_interrupted_by_power_off;
+using esphome::tcl_climate::tcl_should_queue_deferred_fields_after_power_on;
+using esphome::tcl_climate::tcl_should_suppress_internal_deferred_beep;
+using esphome::tcl_climate::tcl_sticky_fields_for_power_off;
+using esphome::tcl_climate::tcl_sticky_fields_for_power_on;
 using esphome::tcl_climate::tcl_status_state_is_plausible;
 using esphome::tcl_climate::tcl_supported_status_frame_size;
 using esphome::tcl_climate::tcl_switch_state_changed;
+using esphome::tcl_climate::tcl_tclac_phase_a_safe_fields;
 using esphome::tcl_climate::tcl_uart_state_can_replace_switch_intent;
 using esphome::tcl_climate::tcl_validate_status_frame;
+using esphome::tcl_climate::tcl_visible_deferred_fields;
+using esphome::tcl_climate::tcl_visible_intent_layers;
 using esphome::tcl_climate::tcl_xor_checksum;
 
 namespace {
@@ -116,20 +127,202 @@ int main() {
   require(tcl_switch_state_changed(true, true, false),
           "a changed switch value is persisted");
 
+  constexpr uint32_t pending_power = 1U << 0;
+  constexpr uint32_t pending_mode = 1U << 1;
+  constexpr uint32_t pending_target = 1U << 2;
+  constexpr uint32_t pending_fan = 1U << 3;
   constexpr uint32_t pending_display = 1U << 4;
+  constexpr uint32_t pending_eco = 1U << 5;
+  constexpr uint32_t pending_turbo = 1U << 6;
   constexpr uint32_t pending_health = 1U << 7;
+  constexpr uint32_t pending_horizontal_swing = 1U << 8;
+  constexpr uint32_t pending_vertical_swing = 1U << 9;
+  constexpr uint32_t pending_sleep = 1U << 10;
+  constexpr uint32_t pending_mute = 1U << 11;
   constexpr uint32_t pending_beep = 1U << 12;
-  require(tcl_uart_state_can_replace_switch_intent(0, 0, pending_display),
+  constexpr uint32_t off_deferable_fields =
+      pending_target | pending_fan | pending_display | pending_eco |
+      pending_turbo | pending_health | pending_horizontal_swing |
+      pending_vertical_swing | pending_sleep | pending_mute;
+  constexpr uint32_t phase_a_fields =
+      pending_power | pending_mode | pending_beep;
+  constexpr uint32_t sticky_switch_fields = pending_display | pending_health;
+  require(tcl_uart_state_can_replace_switch_intent(0, 0, 0, pending_display),
           "idle UART status may refresh a switch");
   require(!tcl_uart_state_can_replace_switch_intent(
-              pending_display, 0, pending_display),
+              pending_display, 0, 0, pending_display),
           "queued display intent blocks stale UART publication");
   require(!tcl_uart_state_can_replace_switch_intent(
-              0, pending_health, pending_health),
+              0, pending_health, 0, pending_health),
           "unconfirmed health intent blocks stale UART publication");
   require(tcl_uart_state_can_replace_switch_intent(
-              pending_beep, 0, pending_display),
+              pending_beep, 0, 0, pending_display),
           "an unrelated write-only beep intent does not block display status");
+
+  const uint32_t coalesced_requested =
+      pending_power | pending_mode | pending_health;
+  const uint32_t coalesced_deferred = tcl_capture_off_deferred_fields(
+      true, coalesced_requested, 0, off_deferable_fields);
+  require(coalesced_deferred == pending_health,
+          "health intent is captured from confirmed OFF before a coalesced ON TX");
+  require(tcl_command_confirmation_fields(
+              true, coalesced_requested, phase_a_fields) ==
+              (pending_power | pending_mode),
+          "coalesced power-on phase A confirms only power and mode");
+  require(tcl_capture_off_deferred_fields(
+              false, pending_health, 0, off_deferable_fields) == 0,
+          "a health change received while confirmed ON remains one-phase");
+
+  const uint32_t all_explicit_options = off_deferable_fields | pending_beep;
+  const uint32_t captured_explicit_options =
+      tcl_capture_off_deferred_fields(true, all_explicit_options, 0,
+                                      off_deferable_fields);
+  require(captured_explicit_options == off_deferable_fields,
+          "target, fan, preset, swing, display, and health selected while OFF defer");
+  require((captured_explicit_options & pending_beep) == 0,
+          "write-only beep policy is never deferred or confirmed");
+  const uint32_t synthetic_legacy_off_reset =
+      pending_fan | pending_eco | pending_turbo | pending_sleep;
+  require(tcl_capture_off_deferred_fields(
+              true, synthetic_legacy_off_reset, synthetic_legacy_off_reset,
+              off_deferable_fields) == 0,
+          "synthetic legacy OFF resets do not resurrect an old preset or fan");
+
+  require(tcl_effective_off_epoch(false, 0, true, 0, true,
+                                  pending_power),
+          "a confirmed OFF state opens the preference-defer epoch");
+  const bool pending_off_epoch = tcl_effective_off_epoch(
+      true, pending_power | pending_target, false, 0, true, pending_power);
+  require(pending_off_epoch,
+          "a queued OFF opens the epoch before UART confirmation");
+  require(tcl_capture_off_deferred_fields(
+              pending_off_epoch, pending_target | pending_fan, 0,
+              off_deferable_fields) == (pending_target | pending_fan),
+          "target and fan selected in the queued-OFF race remain deferred");
+  const bool awaiting_off_epoch = tcl_effective_off_epoch(
+      true, pending_health, true, pending_power, false, pending_power);
+  require(awaiting_off_epoch,
+          "an in-flight OFF keeps the epoch open for a later switch request");
+  require(tcl_capture_off_deferred_fields(
+              awaiting_off_epoch, pending_health, 0,
+              off_deferable_fields) == pending_health,
+          "health selected while OFF confirmation is in flight remains deferred");
+  require(!tcl_effective_off_epoch(true, pending_power, true, 0, true,
+                                   pending_power),
+          "an unsent OFF superseded by ON does not create a synthetic OFF epoch");
+
+  const uint32_t sticky_after_power_on = tcl_sticky_fields_for_power_on(
+      false, true, sticky_switch_fields);
+  require(sticky_after_power_on == sticky_switch_fields,
+          "display and health always get phase B on each confirmed OFF-to-ON edge");
+  require(tcl_sticky_fields_for_power_on(true, true, sticky_switch_fields) == 0,
+          "repeated ON status does not create another sticky phase B");
+  const uint32_t sticky_after_power_off = tcl_sticky_fields_for_power_off(
+      true, false, sticky_switch_fields);
+  require(sticky_after_power_off == sticky_switch_fields,
+          "falling power captures display and health before OFF feedback publishes");
+  require(tcl_sticky_fields_for_power_off(false, false, sticky_switch_fields) == 0,
+          "repeated OFF status does not create another sticky capture");
+  const bool reported_off_display = false;
+  const bool requested_sticky_display = true;
+  const bool visible_display =
+      (tcl_visible_deferred_fields(sticky_after_power_off,
+                                   off_deferable_fields) & pending_display) != 0
+          ? requested_sticky_display
+          : reported_off_display;
+  require(visible_display,
+          "ON-to-OFF display=false feedback cannot erase a sticky ON intent");
+  require(!tcl_uart_state_can_replace_switch_intent(
+              0, 0, sticky_after_power_on, pending_health),
+          "an OFF-state deferred preference blocks stale UART publication");
+  require(!tcl_should_queue_deferred_fields_after_power_on(
+              true, sticky_after_power_on, true, false),
+          "phase B waits until power-on phase A is confirmed");
+  require(tcl_should_queue_deferred_fields_after_power_on(
+              true, sticky_after_power_on, false, false),
+          "confirmed power-on queues sticky preferences as phase B");
+  require(!tcl_should_queue_deferred_fields_after_power_on(
+              false, sticky_after_power_on, false, false),
+          "deferred preferences remain dormant while the appliance is OFF");
+  require(tcl_command_confirmation_fields(
+              false, sticky_after_power_on, phase_a_fields) ==
+              sticky_after_power_on,
+          "phase B confirms the deferred display and health fields themselves");
+  const uint32_t phase_b_confirmation =
+      tcl_command_confirmation_fields(false, sticky_after_power_on,
+                                      phase_a_fields) |
+      pending_power;
+  require((phase_b_confirmation & pending_power) != 0,
+          "phase B requires the appliance to remain powered ON");
+  require(tcl_phase_b_interrupted_by_power_off(false,
+                                               sticky_after_power_on),
+          "an OFF report aborts phase B without confirming false features");
+  require(!tcl_phase_b_interrupted_by_power_off(true,
+                                                sticky_after_power_on),
+          "an ON report may confirm phase-B preferences normally");
+  require(tcl_should_suppress_internal_deferred_beep(
+              sticky_after_power_on, sticky_after_power_on,
+              sticky_after_power_on,
+              pending_beep),
+          "internal phase B suppresses a second audible beep");
+  require(!tcl_should_suppress_internal_deferred_beep(
+              0, coalesced_requested, coalesced_deferred,
+              pending_beep),
+          "phase A keeps the configured beep policy");
+  require(!tcl_should_suppress_internal_deferred_beep(
+              sticky_after_power_on, sticky_after_power_on | pending_beep,
+              sticky_after_power_on, pending_beep),
+          "an explicit beep request is not suppressed by phase B");
+  require(!tcl_should_suppress_internal_deferred_beep(
+              sticky_after_power_on, sticky_after_power_on | pending_power,
+              sticky_after_power_on, pending_beep),
+          "a command with any non-deferred field is not treated as internal phase B");
+
+  constexpr uint32_t tclac_phase_a_safe_fields =
+      pending_fan | pending_eco | pending_turbo | pending_horizontal_swing |
+      pending_vertical_swing | pending_sleep | pending_mute;
+  require(tcl_tclac_phase_a_safe_fields(
+              true, true, tclac_phase_a_safe_fields) ==
+              tclac_phase_a_safe_fields,
+          "tclac phase A neutralizes stale fan, preset, and swing fields");
+  require((tclac_phase_a_safe_fields & pending_target) == 0,
+          "tclac phase A does not neutralize the selected target");
+  const uint32_t tclac_no_child_phase_a_safe_fields =
+      tclac_phase_a_safe_fields | pending_display | pending_health;
+  require((tcl_tclac_phase_a_safe_fields(
+               true, true, tclac_no_child_phase_a_safe_fields) &
+           (pending_display | pending_health)) ==
+              (pending_display | pending_health),
+          "tclac phase A neutralizes stale display/health without child switches");
+  require(tcl_tclac_phase_a_safe_fields(
+              false, true, tclac_phase_a_safe_fields) == 0 &&
+              tcl_tclac_phase_a_safe_fields(
+                  true, false, tclac_phase_a_safe_fields) == 0,
+          "safe-field neutralization is exclusive to tclac phase A");
+
+  const auto stale_one_layers = tcl_visible_intent_layers(
+      0, pending_target | pending_fan, 0, off_deferable_fields);
+  require(stale_one_layers.awaiting_fields ==
+              (pending_target | pending_fan),
+          "the first stale UART report keeps in-flight target and fan visible");
+  const auto stale_two_layers = tcl_visible_intent_layers(
+      0, pending_target | pending_fan, pending_health,
+      off_deferable_fields);
+  require(stale_two_layers.awaiting_fields ==
+              (pending_target | pending_fan) &&
+              stale_two_layers.deferred_fields == pending_health,
+          "the second stale report keeps awaiting and deferred intentions visible");
+  const auto rejected_three_layers = tcl_visible_intent_layers(
+      0, 0, 0, off_deferable_fields);
+  require(rejected_three_layers.awaiting_fields == 0 &&
+              rejected_three_layers.deferred_fields == 0 &&
+              rejected_three_layers.pending_fields == 0,
+          "after the third rejection no overlay hides the UART appliance state");
+  const auto newest_pending_layers = tcl_visible_intent_layers(
+      pending_target, pending_target, pending_target,
+      off_deferable_fields);
+  require(newest_pending_layers.pending_fields == pending_target,
+          "a newer queued target is the last visible overlay layer");
 
   const std::array<uint8_t, 8> expected_request{
       0xBB, 0x00, 0x01, 0x04, 0x02, 0x01, 0x00, 0xBD,
@@ -399,6 +592,12 @@ int main() {
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x58,
   };
   require(control_equals(control, expected_control), "golden 35-byte user control frame");
+  require((control.bytes[7] & 0x40) != 0,
+          "TCL 35 control frame carries the display preference");
+  require((control.bytes[7] & 0x20) != 0,
+          "TCL 35 control frame carries the write-only beep policy");
+  require((control.bytes[8] & 0x10) != 0,
+          "TCL 35 control frame carries the health preference");
 
   const std::array<uint8_t, 5> status_modes{0x01, 0x02, 0x03, 0x04, 0x05};
   const std::array<uint8_t, 5> control_modes{0x03, 0x07, 0x02, 0x01, 0x08};
@@ -525,6 +724,40 @@ int main() {
       0x00, 0x00, 0x08, 0x08, 0x00, 0x00, 0x00, 0xF7,
   };
   require(control_equals(control, expected_tclac), "golden tclac 38-byte frame");
+
+  TclProtocolState tclac_phase_a{};
+  tclac_phase_a.power = true;
+  tclac_phase_a.mode = 0x01;
+  tclac_phase_a.target_temperature = 24.0f;
+  tclac_phase_a.display = true;
+  tclac_phase_a.health = true;
+  tclac_phase_a.beep = true;
+  require(tcl_build_control_frame(tclac_phase_a, TCLAC_38, control),
+          "build safe tclac power-on phase A");
+  require((control.bytes[7] & 0x64) == 0x64 &&
+              (control.bytes[8] & 0x10) != 0,
+          "tclac phase A may carry sticky child policies and one audible beep");
+  require((control.bytes[7] & 0x80) == 0 &&
+              (control.bytes[8] & 0xC0) == 0 &&
+              (control.bytes[10] & 0x3F) == 0 &&
+              (control.bytes[11] & 0x08) == 0 &&
+              (control.bytes[19] & 0x01) == 0,
+          "tclac phase A does not revive stale fan, preset, or swing features");
+
+  TclProtocolState tclac_phase_b = tclac_phase_a;
+  tclac_phase_b.beep = false;
+  tclac_phase_b.fan = 0x02;
+  tclac_phase_b.sleep = true;
+  tclac_phase_b.vertical_swing = true;
+  tclac_phase_b.horizontal_swing = true;
+  require(tcl_build_control_frame(tclac_phase_b, TCLAC_38, control),
+          "build tclac preference phase B");
+  require((control.bytes[7] & 0x20) == 0 &&
+              (control.bytes[10] & 0x3F) != 0 &&
+              (control.bytes[11] & 0x08) != 0 &&
+              (control.bytes[19] & 0x01) != 0,
+          "tclac phase B reapplies deferred options without a second beep");
+
   const std::array<uint8_t, 6> tclac_status_fans{0, 1, 2, 3, 4, 5};
   const std::array<uint8_t, 6> tclac_control_fans{0, 1, 3, 5, 6, 7};
   for (size_t i = 0; i < tclac_status_fans.size(); i++) {

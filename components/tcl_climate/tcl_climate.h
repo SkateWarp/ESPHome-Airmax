@@ -118,6 +118,7 @@ class TclClimate final : public climate::Climate,
   bool status_is_fresh_() const;
   bool bus_is_quiet_();
   bool status_confirms_command_(const TclProtocolState &state) const;
+  bool off_epoch_active_() const;
   void restore_switch_(switch_::Switch *entity, TclSwitchType type);
 
   TclFrameParser parser_{};
@@ -130,6 +131,7 @@ class TclClimate final : public climate::Climate,
   uint32_t deferred_fields_{0};
   uint32_t awaiting_deferred_fields_{0};
   uint32_t pending_off_reset_fields_{0};
+  bool last_confirmed_power_{false};
 
   bool supports_heat_{false};
   bool supports_horizontal_swing_{false};
@@ -160,6 +162,18 @@ class TclClimate final : public climate::Climate,
       PENDING_MODE | PENDING_FAN | PENDING_DISPLAY | PENDING_ECO |
       PENDING_TURBO | PENDING_HEALTH | PENDING_HORIZONTAL_SWING |
       PENDING_VERTICAL_SWING | PENDING_SLEEP | PENDING_MUTE;
+  static constexpr uint32_t OFF_DEFERABLE_FIELDS =
+      PENDING_TARGET | PENDING_FAN | PENDING_DISPLAY | PENDING_ECO |
+      PENDING_TURBO | PENDING_HEALTH | PENDING_HORIZONTAL_SWING |
+      PENDING_VERTICAL_SWING | PENDING_SLEEP | PENDING_MUTE;
+  static constexpr uint32_t POWER_ON_PHASE_A_FIELDS =
+      PENDING_POWER | PENDING_MODE | PENDING_BEEP;
+  static constexpr uint32_t STICKY_POST_ON_SWITCH_FIELDS =
+      PENDING_DISPLAY | PENDING_HEALTH;
+  static constexpr uint32_t TCLAC_PHASE_A_SAFE_FIELDS =
+      PENDING_FAN | PENDING_ECO | PENDING_TURBO |
+      PENDING_HORIZONTAL_SWING | PENDING_VERTICAL_SWING | PENDING_SLEEP |
+      PENDING_MUTE;
   static constexpr uint32_t LEGACY_OFF_RESET_FIELDS =
       PENDING_FAN | PENDING_ECO | PENDING_TURBO | PENDING_SLEEP;
 
