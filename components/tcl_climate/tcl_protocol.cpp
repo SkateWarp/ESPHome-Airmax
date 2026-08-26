@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <utility>
 
 namespace esphome::tcl_climate {
@@ -224,11 +225,46 @@ const char *tcl_protocol_profile_name(const TclProtocolProfile profile) {
     case TclProtocolProfile::PROFILE_PIONEER_31:
       return "Pioneer 31 bytes";
     case TclProtocolProfile::PROFILE_TYJW2_35:
-      return "TYJW2 extendido 35 bytes";
+      return "TYJW2 extended 35 bytes";
     case TclProtocolProfile::PROFILE_TCLAC_38:
       return "tclac 38 bytes";
   }
-  return "desconocido";
+  return "unknown";
+}
+
+const char *tcl_fan_speed_text(const uint8_t fan_speed) {
+  if (fan_speed > 117)
+    return "TURBO";
+  if (fan_speed >= 99)
+    return "HIGH";
+  if (fan_speed >= 86)
+    return "MEDIUM";
+  if (fan_speed > 0)
+    return "LOW";
+  return "OFF";
+}
+
+void tcl_format_fault_text(const uint8_t fault, char *output, const size_t output_size) {
+  if (output == nullptr || output_size == 0)
+    return;
+  if (fault == 0) {
+    std::snprintf(output, output_size, "NO FAULTS");
+  } else {
+    std::snprintf(output, output_size, "FAULT %02X", static_cast<unsigned>(fault));
+  }
+}
+
+void tcl_format_profile_text(const TclProtocolProfile profile, const size_t status_frame_size,
+                             char *output, const size_t output_size) {
+  if (output == nullptr || output_size == 0)
+    return;
+  if (status_frame_size == 0) {
+    std::snprintf(output, output_size, "TX %s / RX AUTO (waiting)",
+                  tcl_protocol_profile_name(profile));
+  } else {
+    std::snprintf(output, output_size, "TX %s / RX %u", tcl_protocol_profile_name(profile),
+                  static_cast<unsigned>(status_frame_size));
+  }
 }
 
 float tcl_protocol_target_step(const TclProtocolProfile profile) {

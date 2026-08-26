@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cinttypes>
 #include <cmath>
-#include <cstdio>
 #include <limits>
 #include <string>
 
@@ -1252,24 +1251,12 @@ void TclClimate::publish_protocol_state_() {
                               this->state_.horizontal_vane_position);
   }
 
-  const char *fan_speed_text = "APAGADO";
-  if (this->state_.fan_speed > 117)
-    fan_speed_text = "TURBO";
-  else if (this->state_.fan_speed >= 99)
-    fan_speed_text = "ALTO";
-  else if (this->state_.fan_speed >= 86)
-    fan_speed_text = "MEDIO";
-  else if (this->state_.fan_speed > 0)
-    fan_speed_text = "BAJO";
-  publish_text_if_changed(this->fan_speed_text_sensor_, fan_speed_text);
+  publish_text_if_changed(this->fan_speed_text_sensor_,
+                          tcl_fan_speed_text(this->state_.fan_speed));
 
-  if (this->state_.fault == 0) {
-    publish_text_if_changed(this->fault_text_sensor_, "SIN FALLAS");
-  } else {
-    char fault_text[16];
-    std::snprintf(fault_text, sizeof(fault_text), "FALLA %02X", this->state_.fault);
-    publish_text_if_changed(this->fault_text_sensor_, fault_text);
-  }
+  char fault_text[16];
+  tcl_format_fault_text(this->state_.fault, fault_text, sizeof(fault_text));
+  publish_text_if_changed(this->fault_text_sensor_, fault_text);
 
   const bool deep_sleep =
       this->deep_sleep_active_low_ ? !this->state_.deep_sleep_bit : this->state_.deep_sleep_bit;
@@ -1282,14 +1269,8 @@ void TclClimate::publish_profile_state_() {
   if (this->protocol_profile_text_sensor_ == nullptr)
     return;
   char value[64];
-  if (this->active_status_frame_size_ == 0) {
-    std::snprintf(value, sizeof(value), "TX %s / RX AUTO (esperando)",
-                  tcl_protocol_profile_name(this->active_profile_));
-  } else {
-    std::snprintf(value, sizeof(value), "TX %s / RX %u",
-                  tcl_protocol_profile_name(this->active_profile_),
-                  this->active_status_frame_size_);
-  }
+  tcl_format_profile_text(this->active_profile_, this->active_status_frame_size_, value,
+                          sizeof(value));
   publish_text_if_changed(this->protocol_profile_text_sensor_, value);
 }
 

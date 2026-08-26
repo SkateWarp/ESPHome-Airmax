@@ -268,6 +268,31 @@ climate:
 the supplied working setup; `health` intentionally starts on. Remove any of
 those child entries when the connected model does not support them.
 
+## Text sensor states
+
+Diagnostic text-sensor states are published in English:
+
+- Fan speed: `OFF`, `LOW`, `MEDIUM`, `HIGH` or `TURBO`.
+- Fault: `NO FAULTS` or `FAULT XX`, where `XX` is the hexadecimal fault code.
+- With `status_frame_length: auto`, the protocol-profile text sensor reports
+  `RX AUTO (waiting)` until the response length and signature are locked.
+
+This replaces the former Spanish state strings. Update automations, templates
+or MQTT consumers that compare those exact values; entity IDs and protocol
+behavior are unchanged.
+
+| Previous value | Current value |
+| --- | --- |
+| `APAGADO` | `OFF` |
+| `BAJO` | `LOW` |
+| `MEDIO` | `MEDIUM` |
+| `ALTO` | `HIGH` |
+| `SIN FALLAS` | `NO FAULTS` |
+| `FALLA XX` | `FAULT XX` |
+| `TYJW2 extendido 35 bytes` | `TYJW2 extended 35 bytes` |
+| `desconocido` | `unknown` |
+| `RX AUTO (esperando)` | `RX AUTO (waiting)` |
+
 ## Electrical safety
 
 - Connect controller and air-conditioner ground.

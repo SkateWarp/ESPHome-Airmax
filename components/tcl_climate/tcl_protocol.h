@@ -154,6 +154,10 @@ class TclFrameParser {
 
 uint8_t tcl_xor_checksum(const uint8_t *data, size_t length);
 const char *tcl_protocol_profile_name(TclProtocolProfile profile);
+const char *tcl_fan_speed_text(uint8_t fan_speed);
+void tcl_format_fault_text(uint8_t fault, char *output, size_t output_size);
+void tcl_format_profile_text(TclProtocolProfile profile, size_t status_frame_size,
+                             char *output, size_t output_size);
 float tcl_protocol_target_step(TclProtocolProfile profile);
 bool tcl_supported_status_frame_size(size_t length);
 bool tcl_normalize_supply_voltage(uint8_t raw, uint16_t &normalized,

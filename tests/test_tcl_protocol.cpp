@@ -2,8 +2,10 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <cstdlib>
 #include <iostream>
+#include <string>
 
 #include "../components/tcl_climate/tcl_protocol.h"
 #include "../components/tcl_climate/tcl_state_policy.h"
@@ -25,6 +27,9 @@ using esphome::tcl_climate::tcl_command_confirmation_fields;
 using esphome::tcl_climate::tcl_decode_status_frame;
 using esphome::tcl_climate::tcl_effective_off_epoch;
 using esphome::tcl_climate::tcl_extract_status_signature;
+using esphome::tcl_climate::tcl_fan_speed_text;
+using esphome::tcl_climate::tcl_format_fault_text;
+using esphome::tcl_climate::tcl_format_profile_text;
 using esphome::tcl_climate::tcl_normalize_supply_voltage;
 using esphome::tcl_climate::tcl_phase_b_interrupted_by_power_off;
 using esphome::tcl_climate::tcl_should_queue_deferred_fields_after_power_on;
@@ -33,6 +38,7 @@ using esphome::tcl_climate::tcl_sticky_fields_for_power_off;
 using esphome::tcl_climate::tcl_sticky_fields_for_power_on;
 using esphome::tcl_climate::tcl_status_state_is_plausible;
 using esphome::tcl_climate::tcl_supported_status_frame_size;
+using esphome::tcl_climate::tcl_protocol_profile_name;
 using esphome::tcl_climate::tcl_switch_state_changed;
 using esphome::tcl_climate::tcl_tclac_phase_a_safe_fields;
 using esphome::tcl_climate::tcl_uart_state_can_replace_switch_intent;
@@ -331,6 +337,64 @@ int main() {
   require(tcl_xor_checksum(TCL_STATUS_REQUEST.data(), TCL_STATUS_REQUEST.size() - 1) == 0xBD,
           "golden status-request checksum");
   require(tcl_xor_checksum(nullptr, 0) == 0, "empty checksum");
+
+  require(std::strcmp(tcl_protocol_profile_name(TCL_35), "TCL 35 bytes") == 0 &&
+              std::strcmp(tcl_protocol_profile_name(ELECTRIQ_31),
+                          "ElectriQ 31 bytes") == 0 &&
+              std::strcmp(tcl_protocol_profile_name(PIONEER_31),
+                          "Pioneer 31 bytes") == 0 &&
+              std::strcmp(tcl_protocol_profile_name(TYJW2_35),
+                          "TYJW2 extended 35 bytes") == 0 &&
+              std::strcmp(tcl_protocol_profile_name(TCLAC_38),
+                          "tclac 38 bytes") == 0,
+          "protocol profile names are English");
+  require(std::strcmp(tcl_protocol_profile_name(
+                          static_cast<TclProtocolProfile>(0xFF)),
+                      "unknown") == 0,
+          "unknown protocol profile is English");
+
+  const std::array<uint8_t, 8> fan_speed_boundaries{0, 1, 85, 86, 98, 99, 117, 118};
+  const std::array<const char *, 8> expected_fan_speed_text{
+      "OFF", "LOW", "LOW", "MEDIUM", "MEDIUM", "HIGH", "HIGH", "TURBO"};
+  for (size_t i = 0; i < fan_speed_boundaries.size(); i++)
+    require(std::strcmp(tcl_fan_speed_text(fan_speed_boundaries[i]),
+                        expected_fan_speed_text[i]) == 0,
+            "fan-speed diagnostic text is English at every boundary");
+
+  char fault_text[16]{};
+  tcl_format_fault_text(0, fault_text, sizeof(fault_text));
+  require(std::strcmp(fault_text, "NO FAULTS") == 0,
+          "zero fault diagnostic is English");
+  tcl_format_fault_text(0x01, fault_text, sizeof(fault_text));
+  require(std::strcmp(fault_text, "FAULT 01") == 0,
+          "fault diagnostic keeps a leading zero");
+  tcl_format_fault_text(0xAB, fault_text, sizeof(fault_text));
+  require(std::strcmp(fault_text, "FAULT AB") == 0,
+          "fault diagnostic uses uppercase hexadecimal");
+  tcl_format_fault_text(0xFF, fault_text, sizeof(fault_text));
+  require(std::strcmp(fault_text, "FAULT FF") == 0,
+          "maximum fault diagnostic is formatted safely");
+  char tiny_fault_text[5]{};
+  tcl_format_fault_text(0xAB, tiny_fault_text, sizeof(tiny_fault_text));
+  require(std::strcmp(tiny_fault_text, "FAUL") == 0,
+          "fault diagnostic is safely truncated");
+  tcl_format_fault_text(0xAB, nullptr, 0);
+
+  char profile_text[64]{};
+  tcl_format_profile_text(TCL_35, 0, profile_text, sizeof(profile_text));
+  require(std::strcmp(profile_text, "TX TCL 35 bytes / RX AUTO (waiting)") == 0,
+          "auto response profile reports waiting in English");
+  for (const size_t frame_size : {size_t{61}, size_t{65}, size_t{68}}) {
+    tcl_format_profile_text(TCLAC_38, frame_size, profile_text, sizeof(profile_text));
+    const std::string expected = "TX tclac 38 bytes / RX " + std::to_string(frame_size);
+    require(std::strcmp(profile_text, expected.c_str()) == 0,
+            "locked response profile reports its frame size");
+  }
+  char tiny_profile_text[4]{};
+  tcl_format_profile_text(TCL_35, 0, tiny_profile_text, sizeof(tiny_profile_text));
+  require(std::strcmp(tiny_profile_text, "TX ") == 0,
+          "profile diagnostic is safely truncated");
+  tcl_format_profile_text(TCL_35, 0, nullptr, 0);
 
   require(tcl_supported_status_frame_size(61) && tcl_supported_status_frame_size(65) &&
               tcl_supported_status_frame_size(68),
