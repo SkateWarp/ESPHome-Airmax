@@ -1,0 +1,27 @@
+# Temporary diagnostic overlay for the TCL UART bus.
+# Include this after common.yaml and remove it when the capture is complete.
+
+substitutions:
+  raw_uart_id: uart_bus
+
+logger:
+  # Never send logger output through the same serial bus used by the A/C.
+  baud_rate: 0
+
+  # DEBUG must be compiled in for uart_debug. Keep every other tag at WARN so
+  # the capture stays readable and does not flood the device with unrelated logs.
+  level: DEBUG
+  initial_level: WARN
+  logs:
+    uart_debug: DEBUG
+
+uart:
+  id: ${raw_uart_id}
+  debug:
+    direction: BOTH
+    after:
+      # TCL frames are at most 68 bytes today. This limit also bounds noise.
+      bytes: 96
+      timeout: 100ms
+    dummy_receiver: false
+    debug_prefix: "TCL "

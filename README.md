@@ -75,6 +75,42 @@ Serial logging must not share the TCL bus. The standard ESP32 example uses
 GPIO17/GPIO16 (UART2); the ESP32-C3 and legacy ESP8266 examples use
 GPIO1/GPIO3. All pins can be changed.
 
+## Temporary raw UART capture
+
+ESPHome can capture the complete byte stream in both directions without
+changing the climate component. This is useful when comparing what a real
+remote control calls Turbo, Diffuse or another model-specific function.
+
+For a local checkout, include the diagnostic overlay after `common.yaml`:
+
+```yaml
+packages:
+  tcl_climate_common: !include common.yaml
+  raw_uart_capture: !include raw_uart_debug.yaml
+```
+
+The repository also provides `example_raw_debug.yaml` as a ready-to-adapt
+ESP32-C3 example.
+
+For an existing configuration that does not use `common.yaml`, copy the
+`logger:` and `uart.debug:` sections from `raw_uart_debug.yaml` into it. Keep
+the existing UART pins, baud rate, parity and stop bits. If the UART ID is not
+`uart_bus`, set `raw_uart_id` to the existing ID in the main configuration:
+
+```yaml
+substitutions:
+  raw_uart_id: your_uart_id
+```
+
+The log uses `TCL <<<` for bytes received from the appliance and `TCL >>>` for
+bytes transmitted to it. A short capture should contain a stable baseline,
+one press of the function being tested and the following status replies.
+
+Raw frames reveal operating state, temperatures, faults and model-specific
+bytes. Capture them only briefly, keep the full log private and remove the
+overlay after testing. Do not enable a serial logger on the TCL UART; the
+overlay deliberately keeps `logger.baud_rate: 0`.
+
 ## Startup detection
 
 The safe default is:
@@ -281,18 +317,6 @@ This replaces the former Spanish state strings. Update automations, templates
 or MQTT consumers that compare those exact values; entity IDs and protocol
 behavior are unchanged.
 
-| Previous value | Current value |
-| --- | --- |
-| `APAGADO` | `OFF` |
-| `BAJO` | `LOW` |
-| `MEDIO` | `MEDIUM` |
-| `ALTO` | `HIGH` |
-| `SIN FALLAS` | `NO FAULTS` |
-| `FALLA XX` | `FAULT XX` |
-| `TYJW2 extendido 35 bytes` | `TYJW2 extended 35 bytes` |
-| `desconocido` | `unknown` |
-| `RX AUTO (esperando)` | `RX AUTO (waiting)` |
-
 ## Electrical safety
 
 - Connect controller and air-conditioner ground.
@@ -348,9 +372,3 @@ protocol decoding work by
 [htmltiger](https://github.com/htmltiger/tcl-electriq-split-ac), later
 continued in
 [junkfix/tcl-electriq-split-ac](https://github.com/junkfix/tcl-electriq-split-ac).
-
-## Credentials
-
-Never commit `secrets.yaml`. The repository ignores it and includes only a
-placeholder template. Rotate any API, OTA or Wi-Fi credentials that have
-previously been posted or committed.

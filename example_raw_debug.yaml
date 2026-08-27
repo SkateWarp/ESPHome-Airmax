@@ -1,0 +1,6 @@
+# ESP32-C3 diagnostic example with temporary raw TCL UART capture enabled.
+# Use the normal example.yaml again after the capture is complete.
+
+packages:
+  device: !include example.yaml
+  raw_uart_capture: !include raw_uart_debug.yaml

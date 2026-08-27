@@ -1,3 +1,9 @@
+substitutions:
+  raw_uart_id: test_uart
+
+packages:
+  raw_uart_capture: !include ../raw_uart_debug.yaml
+
 esphome:
   name: tcl-climate-esp32c3-test
 
