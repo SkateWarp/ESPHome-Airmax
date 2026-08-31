@@ -17,6 +17,16 @@ assert_restore_mode() {
   fi
 }
 
+assert_generated_line() {
+  local generated_file="$1"
+  local expected_line="$2"
+
+  if ! grep -Fq "$expected_line" "$generated_file"; then
+    echo "Missing generated line: $expected_line" >&2
+    return 1
+  fi
+}
+
 g++ \
   -std=c++17 \
   -Wall \
@@ -43,6 +53,12 @@ if command -v "$esphome_bin" >/dev/null 2>&1; then
   assert_restore_mode "$esp32_main" test_default_display SWITCH_RESTORE_DEFAULT_ON
   assert_restore_mode "$esp32_main" test_default_beep SWITCH_RESTORE_DEFAULT_OFF
   assert_restore_mode "$esp32_main" test_default_health SWITCH_RESTORE_DEFAULT_ON
+
+  esp32c3_main="$project_dir/tests/.esphome/build/tcl-climate-esp32c3-test/src/main.cpp"
+  assert_generated_line "$esp32c3_main" \
+    "test_climate->set_health_ignore_appliance_state(true);"
+  assert_generated_line "$esp32c3_main" \
+    "test_climate->set_display_ignore_appliance_state(false);"
 else
   echo "ESPHome is not installed; skipped schema validation and firmware compilation."
 fi

@@ -67,7 +67,8 @@ climate:
     status_frame_length: auto
 
     # Restore mode, target, fan, swing and preset after a blackout.
-    # A single combined command is sent only after a valid status response.
+    # Restore starts only after a valid status response; profiles that require
+    # it use a safe power/mode phase followed by the saved options.
     restore_state: true
 
     # Optional capabilities seen on related models; disabled by default.

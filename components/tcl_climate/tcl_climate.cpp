@@ -69,6 +69,16 @@ void TclClimate::setup() {
   if (this->restore_state_enabled_ && this->restore_state_runtime_enabled_) {
     auto restored = this->restore_state_();
     if (restored.has_value()) {
+      if (this->configured_profile_ == TclProtocolProfile::PROFILE_TCLAC_38 &&
+          !restored->uses_custom_fan_mode &&
+          restored->fan_mode == climate::CLIMATE_FAN_DIFFUSE) {
+        // Older releases mislabeled the tclac Turbo bit as Diffuse. Preserve
+        // that persisted choice while migrating it to the Boost preset.
+        restored->fan_mode = climate::CLIMATE_FAN_AUTO;
+        restored->uses_custom_preset = false;
+        restored->preset = climate::CLIMATE_PRESET_BOOST;
+        ESP_LOGI(TAG, "Migrated persisted tclac Diffuse state to Boost");
+      }
       // control() only queues the compact restored state. Transmission remains
       // locked until a fresh, validated appliance status has been received.
       restored->to_call(this).perform();
@@ -117,6 +127,14 @@ void TclClimate::dump_config() {
     ESP_LOGCONFIG(TAG, "  Runtime restore switch: %s",
                   ONOFF(this->restore_state_runtime_enabled_));
   }
+  if (this->display_switch_ != nullptr) {
+    ESP_LOGCONFIG(TAG, "  Display ignores appliance state: %s",
+                  YESNO(this->display_ignore_appliance_state_));
+  }
+  if (this->health_switch_ != nullptr) {
+    ESP_LOGCONFIG(TAG, "  Health ignores appliance state: %s",
+                  YESNO(this->health_ignore_appliance_state_));
+  }
   ESP_LOGCONFIG(TAG, "  Temperature moving-average samples: %u", this->temperature_window_size_);
   ESP_LOGCONFIG(TAG, "  Status timeout: %" PRIu32 " ms", this->status_timeout_ms_);
   ESP_LOGCONFIG(TAG, "  Inter-byte timeout: %" PRIu32 " ms", this->inter_byte_timeout_ms_);
@@ -144,7 +162,6 @@ climate::ClimateTraits TclClimate::traits() {
   if (this->configured_profile_ == TclProtocolProfile::PROFILE_TCLAC_38) {
     traits.add_supported_fan_mode(climate::CLIMATE_FAN_MIDDLE);
     traits.add_supported_fan_mode(climate::CLIMATE_FAN_FOCUS);
-    traits.add_supported_fan_mode(climate::CLIMATE_FAN_DIFFUSE);
   }
 
   traits.add_supported_swing_mode(climate::CLIMATE_SWING_OFF);
@@ -160,9 +177,8 @@ climate::ClimateTraits TclClimate::traits() {
   if (this->configured_profile_ == TclProtocolProfile::PROFILE_TCLAC_38) {
     if (this->health_switch_ == nullptr)
       traits.add_supported_preset(climate::CLIMATE_PRESET_COMFORT);
-  } else {
-    traits.add_supported_preset(climate::CLIMATE_PRESET_BOOST);
   }
+  traits.add_supported_preset(climate::CLIMATE_PRESET_BOOST);
   traits.set_visual_min_temperature(16.0f);
   traits.set_visual_max_temperature(
       tcl_protocol_target_step(this->configured_profile_) == 0.5f ? 31.5f : 31.0f);
@@ -364,7 +380,7 @@ void TclClimate::handle_frame_(const uint8_t *data, const size_t length) {
       decoded.display = this->state_.display;
       decoded.fan = this->state_.fan;
       decoded.mute = this->state_.mute;
-      decoded.turbo = this->state_.turbo;  // FAN_DIFFUSE in this profile
+      decoded.turbo = this->state_.turbo;  // BOOST preset in this profile
       decoded.eco = this->state_.eco;
       decoded.health = this->state_.health;
       decoded.sleep = this->state_.sleep;
@@ -410,8 +426,8 @@ void TclClimate::handle_frame_(const uint8_t *data, const size_t length) {
       this->awaiting_command_observable_fields_ = 0;
       this->command_confirmation_misses_ = 0;
       if (retained_local_policy) {
-        ESP_LOGD(TAG, "Observable TCL fields confirmed; write-only or OFF-state "
-                      "preferences remain local until the appliance reports them");
+        ESP_LOGD(TAG, "Observable TCL fields confirmed; write-only, ignored, or "
+                      "OFF-state preferences remain local");
       } else {
         ESP_LOGD(TAG, "TCL control command confirmed by appliance state");
       }
@@ -531,7 +547,7 @@ bool TclClimate::send_pending_command_() {
   if (this->active_profile_ == TclProtocolProfile::PROFILE_TCLAC_38 &&
       power_on_phase_a) {
     // tclac retains OFF-hidden fields in state_ for normal compatibility.
-    // Do not let an old Sleep/Eco/Diffuse/fan/swing policy hitch a ride on the
+    // Do not let an old Sleep/Eco/Boost/fan/swing policy hitch a ride on the
     // power-on transaction.  Explicit OFF-epoch choices are still retained in
     // requested_state_ and are always re-applied from the fresh ON state in B.
     uint32_t safe_fields = TCLAC_PHASE_A_SAFE_FIELDS;
@@ -588,8 +604,14 @@ bool TclClimate::send_pending_command_() {
     command_fields |= PENDING_POWER;
   this->awaiting_deferred_fields_ = phase_b_fields;
   this->awaiting_command_fields_ = command_fields;
+  uint32_t ignored_appliance_state_fields = 0;
+  if (this->display_ignore_appliance_state_)
+    ignored_appliance_state_fields |= PENDING_DISPLAY;
+  if (this->health_ignore_appliance_state_)
+    ignored_appliance_state_fields |= PENDING_HEALTH;
   this->awaiting_command_observable_fields_ =
-      command_fields & ~static_cast<uint32_t>(PENDING_BEEP);
+      tcl_observable_command_fields(
+          command_fields, PENDING_BEEP, ignored_appliance_state_fields);
   if (this->active_profile_ == TclProtocolProfile::PROFILE_TCLAC_38 &&
       !command_state.power) {
     // tclac deliberately does not expose these values in an OFF status. Some
@@ -855,14 +877,6 @@ void TclClimate::control(const climate::ClimateCall &call) {
         else
           supported = false;
         break;
-      case climate::CLIMATE_FAN_DIFFUSE:
-        if (tclac_profile) {
-          fan = 0x00;
-          turbo = true;
-        } else {
-          supported = false;
-        }
-        break;
       default:
         supported = false;
         break;
@@ -886,33 +900,28 @@ void TclClimate::control(const climate::ClimateCall &call) {
       case climate::CLIMATE_PRESET_SLEEP:
         this->requested_state_.eco = false;
         this->requested_state_.sleep = true;
-        this->pending_fields_ |= PENDING_ECO | PENDING_SLEEP;
-        explicit_preset_fields |= PENDING_ECO | PENDING_SLEEP;
+        this->requested_state_.turbo = false;
+        this->pending_fields_ |= PENDING_ECO | PENDING_SLEEP | PENDING_TURBO;
+        explicit_preset_fields |= PENDING_ECO | PENDING_SLEEP | PENDING_TURBO;
         if (tclac_profile) {
           if (this->health_switch_ == nullptr) {
             this->requested_state_.health = false;
             this->pending_fields_ |= PENDING_HEALTH;
           }
-        } else {
-          this->requested_state_.turbo = false;
-          this->pending_fields_ |= PENDING_TURBO;
-          explicit_preset_fields |= PENDING_TURBO;
         }
         break;
       case climate::CLIMATE_PRESET_NONE:
         this->requested_state_.sleep = false;
         this->requested_state_.eco = false;
-        this->pending_fields_ |= PENDING_SLEEP | PENDING_ECO;
-        explicit_preset_fields |= PENDING_SLEEP | PENDING_ECO;
+        this->requested_state_.turbo = false;
+        this->pending_fields_ |= PENDING_SLEEP | PENDING_ECO | PENDING_TURBO;
+        explicit_preset_fields |= PENDING_SLEEP | PENDING_ECO | PENDING_TURBO;
         if (tclac_profile) {
           if (this->health_switch_ == nullptr) {
             this->requested_state_.health = false;
             this->pending_fields_ |= PENDING_HEALTH;
           }
         } else {
-          this->requested_state_.turbo = false;
-          this->pending_fields_ |= PENDING_TURBO;
-          explicit_preset_fields |= PENDING_TURBO;
           if (!explicit_fan) {
             this->requested_state_.fan = 0x00;
             this->pending_fields_ |= PENDING_FAN;
@@ -923,17 +932,15 @@ void TclClimate::control(const climate::ClimateCall &call) {
       case climate::CLIMATE_PRESET_ECO:
         this->requested_state_.sleep = false;
         this->requested_state_.eco = true;
-        this->pending_fields_ |= PENDING_SLEEP | PENDING_ECO;
-        explicit_preset_fields |= PENDING_SLEEP | PENDING_ECO;
+        this->requested_state_.turbo = false;
+        this->pending_fields_ |= PENDING_SLEEP | PENDING_ECO | PENDING_TURBO;
+        explicit_preset_fields |= PENDING_SLEEP | PENDING_ECO | PENDING_TURBO;
         if (tclac_profile) {
           if (this->health_switch_ == nullptr) {
             this->requested_state_.health = false;
             this->pending_fields_ |= PENDING_HEALTH;
           }
         } else {
-          this->requested_state_.turbo = false;
-          this->pending_fields_ |= PENDING_TURBO;
-          explicit_preset_fields |= PENDING_TURBO;
           if (!explicit_fan) {
             this->requested_state_.fan = 0x00;
             this->pending_fields_ |= PENDING_FAN;
@@ -942,24 +949,30 @@ void TclClimate::control(const climate::ClimateCall &call) {
         }
         break;
       case climate::CLIMATE_PRESET_BOOST:
-        if (tclac_profile) {
-          supported = false;
-        } else {
-          this->requested_state_.fan = 0x03;
-          this->requested_state_.sleep = false;
-          this->requested_state_.turbo = true;
-          this->requested_state_.eco = false;
-          this->pending_fields_ |= PENDING_FAN | PENDING_SLEEP | PENDING_TURBO | PENDING_ECO;
-          explicit_preset_fields |=
-              PENDING_FAN | PENDING_SLEEP | PENDING_TURBO | PENDING_ECO;
+        this->requested_state_.fan = tclac_profile ? 0x00 : 0x03;
+        this->requested_state_.sleep = false;
+        this->requested_state_.turbo = true;
+        this->requested_state_.eco = false;
+        this->requested_state_.mute = false;
+        this->pending_fields_ |= PENDING_FAN | PENDING_SLEEP | PENDING_TURBO |
+                                 PENDING_ECO | PENDING_MUTE;
+        explicit_preset_fields |= PENDING_FAN | PENDING_SLEEP | PENDING_TURBO |
+                                  PENDING_ECO | PENDING_MUTE;
+        if (tclac_profile && this->health_switch_ == nullptr) {
+          this->requested_state_.health = false;
+          this->pending_fields_ |= PENDING_HEALTH;
         }
         break;
       case climate::CLIMATE_PRESET_COMFORT:
         if (tclac_profile && this->health_switch_ == nullptr) {
           this->requested_state_.eco = false;
           this->requested_state_.sleep = false;
+          this->requested_state_.turbo = false;
           this->requested_state_.health = true;
-          this->pending_fields_ |= PENDING_ECO | PENDING_SLEEP | PENDING_HEALTH;
+          this->pending_fields_ |=
+              PENDING_ECO | PENDING_SLEEP | PENDING_TURBO | PENDING_HEALTH;
+          explicit_preset_fields |=
+              PENDING_ECO | PENDING_SLEEP | PENDING_TURBO;
         } else {
           supported = false;
         }
@@ -1162,7 +1175,9 @@ void TclClimate::publish_protocol_state_() {
   const bool tclac_profile =
       this->active_profile_ == TclProtocolProfile::PROFILE_TCLAC_38;
   if (tclac_profile) {
-    if (visible_state.eco)
+    if (visible_state.turbo)
+      this->preset = climate::CLIMATE_PRESET_BOOST;
+    else if (visible_state.eco)
       this->preset = climate::CLIMATE_PRESET_ECO;
     else if (this->health_switch_ == nullptr && visible_state.health)
       this->preset = climate::CLIMATE_PRESET_COMFORT;
@@ -1183,8 +1198,6 @@ void TclClimate::publish_protocol_state_() {
 
   if (visible_state.mute) {
     this->fan_mode = climate::CLIMATE_FAN_QUIET;
-  } else if (tclac_profile && visible_state.turbo) {
-    this->fan_mode = climate::CLIMATE_FAN_DIFFUSE;
   } else if (visible_state.fan == 0x00) {
     this->fan_mode = climate::CLIMATE_FAN_AUTO;
   } else if (visible_state.fan == 0x01) {
@@ -1223,13 +1236,15 @@ void TclClimate::publish_protocol_state_() {
   // that choice is queued or still waiting for command confirmation.
   if (tcl_uart_state_can_replace_switch_intent(
           this->pending_fields_, this->awaiting_command_fields_,
-          this->deferred_fields_, PENDING_DISPLAY) &&
+          this->deferred_fields_, PENDING_DISPLAY,
+          this->display_ignore_appliance_state_) &&
       (!tclac_profile || this->state_.power))
     publish_switch_if_changed(this->display_switch_, this->state_.display);
   if ((this->state_.power || tclac_profile) &&
       tcl_uart_state_can_replace_switch_intent(
           this->pending_fields_, this->awaiting_command_fields_,
-          this->deferred_fields_, PENDING_HEALTH))
+          this->deferred_fields_, PENDING_HEALTH,
+          this->health_ignore_appliance_state_))
     publish_switch_if_changed(this->health_switch_, this->state_.health);
   // Beep is absent from TCL status frames and intentionally never follows
   // UART state; its local persisted switch value remains authoritative.

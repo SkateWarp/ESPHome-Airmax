@@ -166,19 +166,39 @@ returns, the component:
 1. loads the saved state;
 2. sends the heartbeat;
 3. waits for a fresh, valid appliance response;
-4. sends one combined restore command;
+4. sends a safe power/mode command, followed by restored options when needed;
 5. waits for a new status frame that confirms the observable fields.
 
 Display, beep and health also restore their last saved values. On a device with
 no saved preferences yet, the defaults are display ON, beep OFF and health ON.
 These three switches restore independently from the climate restore gate.
-Display and health are later reconciled with confirmed appliance status, but a
+Display and health normally reconcile with confirmed appliance status, but a
 stale status received while their command is queued or awaiting confirmation
-cannot overwrite the saved intent. Beep is write-only in the known status
-frames, so its persisted local value remains authoritative. A real switch
-change from the native API is synchronized to flash immediately; a real display
-or health change observed from UART is synchronized the same way. Identical
-status heartbeats are deduplicated and do not trigger a sync.
+cannot overwrite the saved intent. Either switch can instead set
+`ignore_appliance_state: true`; then its restored Home Assistant value remains
+authoritative and UART status never changes or persists that switch. The saved
+value is still included in future control commands, including the post-power-on
+preference phase, but its appliance bit is excluded from command confirmation.
+This option does not continuously retransmit, so a unit that rejects the setting
+may physically differ from the Home Assistant preference without creating a
+retry loop. The option defaults to `false` and is supported only by display and
+health. Beep is write-only in the known status frames, so its persisted local
+value is already authoritative.
+
+To make a display or health preference authoritative in Home Assistant, opt in
+on that child switch. For example:
+
+```yaml
+health:
+  name: Health Switch
+  restore_mode: RESTORE_DEFAULT_ON
+  ignore_appliance_state: true
+```
+
+A real switch change from the native API is synchronized to flash immediately;
+a real display or health change observed from UART is synchronized the same way
+only when appliance status is not ignored. Identical status heartbeats are
+deduplicated and do not trigger a sync.
 
 The optional restore switch is a runtime gate for the next boot. It defaults
 to ON, remembers only real ON/OFF changes through ESPHome preferences, and can
@@ -277,21 +297,16 @@ Diagnostic text-sensor states are published in English:
 - With `status_frame_length: auto`, the protocol-profile text sensor reports
   `RX AUTO (waiting)` until the response length and signature are locked.
 
+For `tclac_38`, the protocol Turbo bit is exposed as the Home Assistant
+`Boost` preset. It is no longer labeled as the unrelated `Diffuse` fan mode.
+Existing automations should replace the `climate.set_fan_mode` action with
+`climate.set_preset_mode`, and replace `fan_mode: diffuse` with
+`preset_mode: boost`. A saved Diffuse state is migrated once at startup.
+Boost, Eco, Sleep and Comfort are mutually exclusive Home Assistant presets.
+
 This replaces the former Spanish state strings. Update automations, templates
 or MQTT consumers that compare those exact values; entity IDs and protocol
 behavior are unchanged.
-
-| Previous value | Current value |
-| --- | --- |
-| `APAGADO` | `OFF` |
-| `BAJO` | `LOW` |
-| `MEDIO` | `MEDIUM` |
-| `ALTO` | `HIGH` |
-| `SIN FALLAS` | `NO FAULTS` |
-| `FALLA XX` | `FAULT XX` |
-| `TYJW2 extendido 35 bytes` | `TYJW2 extended 35 bytes` |
-| `desconocido` | `unknown` |
-| `RX AUTO (esperando)` | `RX AUTO (waiting)` |
 
 ## Electrical safety
 
@@ -348,9 +363,3 @@ protocol decoding work by
 [htmltiger](https://github.com/htmltiger/tcl-electriq-split-ac), later
 continued in
 [junkfix/tcl-electriq-split-ac](https://github.com/junkfix/tcl-electriq-split-ac).
-
-## Credentials
-
-Never commit `secrets.yaml`. The repository ignores it and includes only a
-placeholder template. Rotate any API, OTA or Wi-Fi credentials that have
-previously been posted or committed.

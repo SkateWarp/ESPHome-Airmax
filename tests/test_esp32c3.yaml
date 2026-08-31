@@ -52,6 +52,7 @@ switch:
     health:
       name: Health
       restore_mode: RESTORE_DEFAULT_ON
+      ignore_appliance_state: true
     restore_state:
       name: Restore State
       restore_mode: RESTORE_DEFAULT_ON

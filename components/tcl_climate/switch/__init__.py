@@ -9,6 +9,11 @@ CONF_DISPLAY = "display"
 CONF_BEEP = "beep"
 CONF_HEALTH = "health"
 CONF_RESTORE_STATE = "restore_state"
+CONF_IGNORE_APPLIANCE_STATE = "ignore_appliance_state"
+
+APPLIANCE_STATE_POLICY_SCHEMA = {
+    cv.Optional(CONF_IGNORE_APPLIANCE_STATE, default=False): cv.boolean,
+}
 
 TclSwitch = tcl_climate_ns.class_(
     "TclSwitch",
@@ -34,7 +39,7 @@ CONFIG_SCHEMA = cv.All(
                 entity_category="config",
                 default_restore_mode="RESTORE_DEFAULT_ON",
                 block_inverted=True,
-            ),
+            ).extend(APPLIANCE_STATE_POLICY_SCHEMA),
             cv.Optional(CONF_BEEP): switch.switch_schema(
                 TclSwitch,
                 icon="mdi:volume-high",
@@ -48,7 +53,7 @@ CONFIG_SCHEMA = cv.All(
                 entity_category="config",
                 default_restore_mode="RESTORE_DEFAULT_ON",
                 block_inverted=True,
-            ),
+            ).extend(APPLIANCE_STATE_POLICY_SCHEMA),
             cv.Optional(CONF_RESTORE_STATE): switch.switch_schema(
                 TclSwitch,
                 icon="mdi:backup-restore",
@@ -70,3 +75,9 @@ async def to_code(config):
             entity = await switch.new_switch(conf, switch_type)
             await cg.register_parented(entity, parent)
             cg.add(getattr(parent, f"set_{key}_switch")(entity))
+            if key in (CONF_DISPLAY, CONF_HEALTH):
+                cg.add(
+                    getattr(parent, f"set_{key}_ignore_appliance_state")(
+                        conf[CONF_IGNORE_APPLIANCE_STATE]
+                    )
+                )

@@ -26,6 +26,7 @@ using esphome::tcl_climate::tcl_capture_off_deferred_fields;
 using esphome::tcl_climate::tcl_command_confirmation_fields;
 using esphome::tcl_climate::tcl_decode_status_frame;
 using esphome::tcl_climate::tcl_effective_off_epoch;
+using esphome::tcl_climate::tcl_observable_command_fields;
 using esphome::tcl_climate::tcl_extract_status_signature;
 using esphome::tcl_climate::tcl_fan_speed_text;
 using esphome::tcl_climate::tcl_format_fault_text;
@@ -153,17 +154,25 @@ int main() {
   constexpr uint32_t phase_a_fields =
       pending_power | pending_mode | pending_beep;
   constexpr uint32_t sticky_switch_fields = pending_display | pending_health;
-  require(tcl_uart_state_can_replace_switch_intent(0, 0, 0, pending_display),
+  require(tcl_uart_state_can_replace_switch_intent(
+              0, 0, 0, pending_display, false),
           "idle UART status may refresh a switch");
   require(!tcl_uart_state_can_replace_switch_intent(
-              pending_display, 0, 0, pending_display),
+              pending_display, 0, 0, pending_display, false),
           "queued display intent blocks stale UART publication");
   require(!tcl_uart_state_can_replace_switch_intent(
-              0, pending_health, 0, pending_health),
+              0, pending_health, 0, pending_health, false),
           "unconfirmed health intent blocks stale UART publication");
   require(tcl_uart_state_can_replace_switch_intent(
-              pending_beep, 0, 0, pending_display),
+              pending_beep, 0, 0, pending_display, false),
           "an unrelated write-only beep intent does not block display status");
+  require(!tcl_uart_state_can_replace_switch_intent(
+              0, 0, 0, pending_health, true),
+          "an authoritative local health policy ignores idle UART status");
+  require(tcl_observable_command_fields(
+              pending_power | pending_health | pending_beep,
+              pending_beep, pending_health) == pending_power,
+          "ignored appliance state is treated as local-only for confirmation");
 
   const uint32_t coalesced_requested =
       pending_power | pending_mode | pending_health;
@@ -239,7 +248,7 @@ int main() {
   require(visible_display,
           "ON-to-OFF display=false feedback cannot erase a sticky ON intent");
   require(!tcl_uart_state_can_replace_switch_intent(
-              0, 0, sticky_after_power_on, pending_health),
+              0, 0, sticky_after_power_on, pending_health, false),
           "an OFF-state deferred preference blocks stale UART publication");
   require(!tcl_should_queue_deferred_fields_after_power_on(
               true, sticky_after_power_on, true, false),
@@ -788,6 +797,19 @@ int main() {
       0x00, 0x00, 0x08, 0x08, 0x00, 0x00, 0x00, 0xF7,
   };
   require(control_equals(control, expected_tclac), "golden tclac 38-byte frame");
+
+  TclProtocolState tclac_boost = tclac;
+  tclac_boost.fan = 0x00;
+  tclac_boost.turbo = true;
+  tclac_boost.mute = false;
+  require(tcl_build_control_frame(tclac_boost, TCLAC_38, control),
+          "build tclac Boost frame");
+  require((control.bytes[8] & 0x40) != 0,
+          "tclac Boost keeps the proven Turbo command bit");
+  require((control.bytes[8] & 0x80) == 0,
+          "tclac Boost clears the unrelated Mute command bit");
+  require((control.bytes[10] & 0x07) == 0,
+          "tclac Boost keeps the underlying automatic fan command");
 
   TclProtocolState tclac_phase_a{};
   tclac_phase_a.power = true;

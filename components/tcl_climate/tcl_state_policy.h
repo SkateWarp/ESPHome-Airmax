@@ -11,9 +11,18 @@ inline constexpr bool tcl_switch_state_changed(
 
 inline constexpr bool tcl_uart_state_can_replace_switch_intent(
     const uint32_t pending_fields, const uint32_t awaiting_command_fields,
-    const uint32_t deferred_fields, const uint32_t switch_field) {
-  return ((pending_fields | awaiting_command_fields | deferred_fields) &
+    const uint32_t deferred_fields, const uint32_t switch_field,
+    const bool ignore_appliance_state) {
+  return !ignore_appliance_state &&
+         ((pending_fields | awaiting_command_fields | deferred_fields) &
           switch_field) == 0;
+}
+
+inline constexpr uint32_t tcl_observable_command_fields(
+    const uint32_t command_fields, const uint32_t write_only_fields,
+    const uint32_t ignored_appliance_state_fields) {
+  return command_fields &
+         ~(write_only_fields | ignored_appliance_state_fields);
 }
 
 inline constexpr uint32_t tcl_visible_deferred_fields(

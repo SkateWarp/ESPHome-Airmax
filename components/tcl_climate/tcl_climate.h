@@ -50,6 +50,12 @@ class TclClimate final : public climate::Climate,
   void set_display_switch(switch_::Switch *value) { this->display_switch_ = value; }
   void set_beep_switch(switch_::Switch *value) { this->beep_switch_ = value; }
   void set_health_switch(switch_::Switch *value) { this->health_switch_ = value; }
+  void set_display_ignore_appliance_state(bool value) {
+    this->display_ignore_appliance_state_ = value;
+  }
+  void set_health_ignore_appliance_state(bool value) {
+    this->health_ignore_appliance_state_ = value;
+  }
   void set_restore_state_switch(switch_::Switch *value) {
     this->restore_state_switch_ = value;
   }
@@ -198,6 +204,8 @@ class TclClimate final : public climate::Climate,
   switch_::Switch *beep_switch_{nullptr};
   switch_::Switch *health_switch_{nullptr};
   switch_::Switch *restore_state_switch_{nullptr};
+  bool display_ignore_appliance_state_{false};
+  bool health_ignore_appliance_state_{false};
 
   sensor::Sensor *current_sensor_{nullptr};
   sensor::Sensor *supply_voltage_sensor_{nullptr};
