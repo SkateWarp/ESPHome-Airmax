@@ -166,6 +166,138 @@ void test_unknown_and_publication_paths(TclProtocolProfile profile) {
           "non-ignored UART changes still update the switches");
 }
 
+uint32_t attach_switch(TclClimate &climate, TclSwitch &entity, TclSwitchType type) {
+  entity.set_parent(&climate);
+  switch (type) {
+    case TclSwitchType::DISPLAY_CONTROL:
+      climate.set_display_switch(&entity);
+      return TclClimate::PENDING_DISPLAY;
+    case TclSwitchType::BEEP_CONTROL:
+      climate.set_beep_switch(&entity);
+      return TclClimate::PENDING_BEEP;
+    case TclSwitchType::HEALTH_CONTROL:
+      climate.set_health_switch(&entity);
+      return TclClimate::PENDING_HEALTH;
+    case TclSwitchType::RESTORE_STATE_CONTROL:
+      climate.set_restore_state_switch(&entity);
+      return 0;  // Local next-boot policy, not an appliance command.
+  }
+  std::abort();
+}
+
+void test_all_switch_writes(TclProtocolProfile profile) {
+  for (const auto type : {TclSwitchType::DISPLAY_CONTROL, TclSwitchType::BEEP_CONTROL,
+                          TclSwitchType::HEALTH_CONTROL, TclSwitchType::RESTORE_STATE_CONTROL}) {
+    TclClimate climate;
+    TclSwitch entity(type);
+    ESPPreferences preferences;
+    global_preferences = &preferences;
+    climate.set_protocol_profile(profile);
+    const auto field = attach_switch(climate, entity, type);
+    entity.restore_mode = switch_::SWITCH_RESTORE_DEFAULT_OFF;
+    climate.setup();
+    require(entity.has_published_state() && !entity.state,
+            "every configured switch initializes its own persisted OFF state");
+    unsigned expected_syncs = 0;
+    bool previous = false;
+    for (const bool requested : {true, true, false, false}) {
+      climate.pending_fields_ = 0;
+      bool callback_known = false;
+      entity.on_state = [&](bool value) {
+        callback_known = entity.has_published_state() && value == requested;
+      };
+      if (requested) entity.turn_on(); else entity.turn_off();
+      expected_syncs += requested != previous;
+      require(callback_known == (requested != previous),
+              "changed states are known inside callbacks; duplicate publications are suppressed");
+      require(entity.has_published_state() && entity.state == requested,
+              "all switches keep the requested known state, including repeated commands");
+      require(entity.persisted == optional<bool>(requested),
+              "every switch saves the requested preference");
+      require(preferences.sync_count == expected_syncs,
+              "all switches sync changes but not repeated same-state commands");
+      require(climate.pending_fields_ == field,
+              "repeated switch commands reassert only their own field; restore is local");
+      if (type == TclSwitchType::RESTORE_STATE_CONTROL)
+        require(climate.restore_state_runtime_enabled_ == requested,
+                "restore switch changes its next-boot gate in both directions");
+      previous = requested;
+    }
+    global_preferences = nullptr;
+  }
+}
+
+void test_all_first_publications(TclProtocolProfile profile) {
+  for (const auto type : {TclSwitchType::DISPLAY_CONTROL, TclSwitchType::BEEP_CONTROL,
+                          TclSwitchType::HEALTH_CONTROL, TclSwitchType::RESTORE_STATE_CONTROL}) {
+    for (const bool requested : {false, true}) {
+      TclClimate climate;
+      TclSwitch entity(type);
+      ESPPreferences preferences;
+      global_preferences = &preferences;
+      climate.set_protocol_profile(profile);
+      const auto field = attach_switch(climate, entity, type);
+      entity.restore_mode = switch_::SWITCH_RESTORE_DISABLED;
+      climate.setup();
+      require(!entity.has_published_state(), "disabled restore leaves every switch unknown");
+      // Isolate first publication from restore initialization, including an
+      // explicit false that equals the inherited, unpublished default value.
+      entity.restore_mode = switch_::SWITCH_RESTORE_DEFAULT_OFF;
+      bool callback_known = false;
+      entity.on_state = [&](bool value) {
+        callback_known = entity.has_published_state() && value == requested;
+      };
+      if (requested) entity.turn_on(); else entity.turn_off();
+      require(callback_known && entity.state == requested,
+              "first true or false publication is known before every switch callback");
+      require(entity.persisted == optional<bool>(requested) && preferences.sync_count == 1,
+              "first explicit preference is saved and synced for every switch");
+      require(climate.pending_fields_ == field,
+              "first preference queues its own field, except local restore policy");
+      global_preferences = nullptr;
+    }
+  }
+}
+
+void test_all_control_combinations(TclProtocolProfile profile) {
+  // Exercise independent ON and OFF choices, not only all switches ON together.
+  for (unsigned combination = 0; combination < 8; ++combination) {
+    const bool health = (combination & 1) != 0;
+    const bool display = (combination & 2) != 0;
+    const bool beep = (combination & 4) != 0;
+    Fixture f(profile);
+    f.establish_on();
+    if (health) f.health.turn_on(); else f.health.turn_off();
+    if (display) f.display.turn_on(); else f.display.turn_off();
+    if (beep) f.beep.turn_on(); else f.beep.turn_off();
+    require(f.climate.send_pending_command_(), "explicit control choices produce a command");
+    assert_command(f.climate.sent_frames.back(), health, display, beep);
+    f.rx(true, health, display);
+    require(f.climate.pending_fields_ == 0, "settle the explicit choices before power-off");
+    f.restore.turn_on();
+    f.restore.turn_off();
+    require(f.climate.pending_fields_ == 0 && f.health.state == health &&
+                f.display.state == display && f.beep.state == beep,
+            "next-boot restore policy emits no command and preserves independent preferences");
+
+    f.rx(false, false, false);
+    require(f.health.state == health && f.display.state == display && f.beep.state == beep,
+            "OFF status preserves each independent control preference");
+    f.on();
+    assert_command(f.climate.sent_frames.back(), health, display, beep);
+    f.rx(true, !health, !display);
+    require(f.climate.send_pending_command_(), "ON feedback triggers the sticky phase B");
+    assert_command(f.climate.sent_frames.back(), health, display, false);
+    f.rx(true, !health, !display);
+    require(f.health.state == health && f.display.state == display && f.beep.state == beep,
+            "ignored contradictory feedback and silent phase B never erase preferences");
+
+    // The internal silent phase must not mute the next user-issued command.
+    f.on();
+    assert_command(f.climate.sent_frames.back(), health, display, beep);
+  }
+}
+
 void test_restore_mode_matrix() {
   struct Case { uint8_t mode; optional<bool> persisted; optional<bool> expected; };
   const Case cases[] = {
@@ -181,20 +313,26 @@ void test_restore_mode_matrix() {
       {switch_::SWITCH_RESTORE_INVERTED_DEFAULT_OFF, {}, false},
       {switch_::SWITCH_RESTORE_INVERTED_DEFAULT_ON, {}, true},
   };
-  for (const auto &test : cases) {
-    TclClimate climate;
-    TclSwitch health(TclSwitchType::HEALTH_CONTROL);
-    health.set_parent(&climate);
-    climate.set_health_switch(&health);
-    health.restore_mode = test.mode;
-    health.persisted = test.persisted;
-    climate.setup();
-    require(health.has_published_state() == test.expected.has_value(),
-            "restore modes only establish known state when an initial value exists");
-    if (test.expected.has_value())
-      require(health.state == *test.expected, "restore mode resolves its native ESPHome value");
-    require(((climate.pending_fields_ & TclClimate::PENDING_HEALTH) != 0) == test.expected.has_value(),
-            "only a resolved restore value queues a Health preference");
+  for (const auto type : {TclSwitchType::DISPLAY_CONTROL, TclSwitchType::BEEP_CONTROL,
+                          TclSwitchType::HEALTH_CONTROL, TclSwitchType::RESTORE_STATE_CONTROL}) {
+    for (const auto &test : cases) {
+      TclClimate climate;
+      TclSwitch entity(type);
+      const auto field = attach_switch(climate, entity, type);
+      entity.restore_mode = test.mode;
+      entity.persisted = test.persisted;
+      climate.setup();
+      require(entity.has_published_state() == test.expected.has_value(),
+              "all switch restore modes establish known state only for resolved initial values");
+      if (test.expected.has_value()) {
+        require(entity.state == *test.expected, "each switch resolves its native ESPHome restore value");
+        if (type == TclSwitchType::RESTORE_STATE_CONTROL)
+          require(climate.restore_state_runtime_enabled_ == *test.expected,
+                  "restored next-boot policy remains local and matches the saved value");
+      }
+      require(climate.pending_fields_ == (test.expected.has_value() ? field : 0),
+              "only resolved appliance-control preferences queue their own field");
+    }
   }
 }
 }
@@ -204,6 +342,9 @@ int main() {
   for (const auto profile : {TclProtocolProfile::PROFILE_TCL_35, TclProtocolProfile::PROFILE_TCLAC_38}) {
     test_power_cycle(profile);
     test_unknown_and_publication_paths(profile);
+    test_all_switch_writes(profile);
+    test_all_first_publications(profile);
+    test_all_control_combinations(profile);
   }
   std::cout << "Switch lifecycle regressions passed (TCL35 and TCLAC38).\n";
 }
