@@ -9,6 +9,7 @@
 #include "esphome/core/log.h"
 #include "esphome/core/preferences.h"
 #include "tcl_state_policy.h"
+#include "switch/tcl_switch.h"
 
 namespace esphome::tcl_climate {
 
@@ -33,12 +34,12 @@ void publish_text_if_changed(text_sensor::TextSensor *entity, const char *value)
     entity->publish_state(value);
 }
 
-void publish_switch_if_changed(switch_::Switch *entity, const bool value) {
+void publish_switch_if_changed(TclSwitch *entity, const bool value) {
   if (entity == nullptr ||
-      !tcl_switch_state_changed(entity->has_state(), entity->state, value))
+      !tcl_switch_state_changed(entity->has_published_state(), entity->state, value))
     return;
 
-  entity->publish_state(value);
+  entity->publish_control_state(value);
   if ((entity->restore_mode & switch_::RESTORE_MODE_PERSISTENT_MASK) &&
       global_preferences != nullptr)
     global_preferences->sync();
@@ -456,9 +457,9 @@ void TclClimate::handle_frame_(const uint8_t *data, const size_t length) {
 
   uint32_t configured_sticky_fields = 0;
   if (two_phase_profile) {
-    if (this->display_switch_ != nullptr && this->display_switch_->has_state())
+    if (this->display_switch_ != nullptr && this->display_switch_->has_published_state())
       configured_sticky_fields |= PENDING_DISPLAY;
-    if (this->health_switch_ != nullptr && this->health_switch_->has_state())
+    if (this->health_switch_ != nullptr && this->health_switch_->has_published_state())
       configured_sticky_fields |= PENDING_HEALTH;
   }
   const uint32_t sticky_fields =
@@ -564,13 +565,13 @@ bool TclClimate::send_pending_command_() {
   // These three controls are represented by child entities in the original component.
   // Their current UI state remains the source of truth when they are configured.
   if (!(this->pending_fields_ & PENDING_DISPLAY) &&
-      this->display_switch_ != nullptr && this->display_switch_->has_state())
+      this->display_switch_ != nullptr && this->display_switch_->has_published_state())
     command_state.display = this->display_switch_->state;
   if (!(this->pending_fields_ & PENDING_BEEP) &&
-      this->beep_switch_ != nullptr && this->beep_switch_->has_state())
+      this->beep_switch_ != nullptr && this->beep_switch_->has_published_state())
     command_state.beep = this->beep_switch_->state;
   if (!(this->pending_fields_ & PENDING_HEALTH) &&
-      this->health_switch_ != nullptr && this->health_switch_->has_state())
+      this->health_switch_ != nullptr && this->health_switch_->has_published_state())
     command_state.health = this->health_switch_->state;
 
   const uint32_t phase_b_fields =
@@ -1289,14 +1290,14 @@ void TclClimate::publish_profile_state_() {
   publish_text_if_changed(this->protocol_profile_text_sensor_, value);
 }
 
-void TclClimate::restore_switch_(switch_::Switch *entity, const TclSwitchType type) {
+void TclClimate::restore_switch_(TclSwitch *entity, const TclSwitchType type) {
   if (entity == nullptr)
     return;
   const auto initial = entity->get_initial_state_with_restore_mode();
   if (!initial.has_value())
     return;
   this->queue_switch_change(type, *initial);
-  entity->publish_state(*initial);
+  entity->publish_control_state(*initial);
 }
 
 }  // namespace esphome::tcl_climate

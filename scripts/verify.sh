@@ -39,6 +39,17 @@ g++ \
 
 "$build_dir/test_tcl_protocol"
 
+g++ \
+  -std=c++17 -Wall -Wextra -Wpedantic -Werror \
+  -I "$project_dir/tests/host_stubs" \
+  "$project_dir/components/tcl_climate/tcl_protocol.cpp" \
+  "$project_dir/components/tcl_climate/tcl_climate.cpp" \
+  "$project_dir/components/tcl_climate/switch/tcl_switch.cpp" \
+  "$project_dir/tests/test_tcl_switch_lifecycle.cpp" \
+  -o "$build_dir/test_tcl_switch_lifecycle"
+
+"$build_dir/test_tcl_switch_lifecycle"
+
 esphome_bin="${ESPHOME_BIN:-esphome}"
 if command -v "$esphome_bin" >/dev/null 2>&1; then
   "$esphome_bin" config "$project_dir/tests/test_host.yaml"

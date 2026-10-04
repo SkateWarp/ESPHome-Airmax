@@ -7,9 +7,9 @@ namespace esphome::tcl_climate {
 
 void TclSwitch::write_state(const bool state) {
   const bool changed =
-      tcl_switch_state_changed(this->has_state(), this->state, state);
+      tcl_switch_state_changed(this->has_published_state(), this->state, state);
   this->parent_->queue_switch_change(this->type_, state);
-  this->publish_state(state);
+  this->publish_control_state(state);
 
   // These control switches change rarely, and their values must survive an
   // immediate power loss. Flush only a real persistent change; the platform

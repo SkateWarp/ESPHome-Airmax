@@ -200,6 +200,12 @@ a real display or health change observed from UART is synchronized the same way
 only when appliance status is not ignored. Identical status heartbeats are
 deduplicated and do not trigger a sync.
 
+The component tracks whether each child switch has actually published a value,
+independently of ESPHome's generic entity state flag. Restored settings,
+explicit switch commands, and accepted UART updates initialize that preference;
+an unknown switch (for example with `RESTORE_DISABLED` and ignored appliance
+status) does not silently override commands with its default `false` value.
+
 The optional restore switch is a runtime gate for the next boot. It defaults
 to ON, remembers only real ON/OFF changes through ESPHome preferences, and can
 be disabled without changing the current air-conditioner state. While it is
@@ -343,8 +349,12 @@ Run:
 
 The suite checks golden frames and checksums, 31/35/38-byte commands,
 61/65/68-byte responses, corrupt and truncated frames, extended fields and
-temperature boundaries. When ESPHome is installed it also validates schemas
-and compiles ESP8266, standard ESP32 and ESP32-C3 test configurations.
+temperature boundaries. It also runs the real climate/switch state machine
+against host doubles that reproduce ESPHome's switch publication semantics,
+covering restored and unknown preferences, OFF-to-ON Health/Display reapplication,
+phase B, Beep, and repeated commands for TCL35 and TCLAC38. When ESPHome is
+installed it also validates schemas and compiles ESP8266, standard ESP32 and
+ESP32-C3 test configurations.
 
 ## References
 

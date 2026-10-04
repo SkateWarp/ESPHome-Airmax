@@ -15,6 +15,8 @@
 
 namespace esphome::tcl_climate {
 
+class TclSwitch;
+
 enum class TclSwitchType : uint8_t {
   DISPLAY_CONTROL,
   BEEP_CONTROL,
@@ -47,16 +49,16 @@ class TclClimate final : public climate::Climate,
   void set_inter_byte_timeout(uint32_t value) { this->inter_byte_timeout_ms_ = value; }
   void set_temperature_samples(uint8_t value) { this->temperature_window_size_ = value; }
 
-  void set_display_switch(switch_::Switch *value) { this->display_switch_ = value; }
-  void set_beep_switch(switch_::Switch *value) { this->beep_switch_ = value; }
-  void set_health_switch(switch_::Switch *value) { this->health_switch_ = value; }
+  void set_display_switch(TclSwitch *value) { this->display_switch_ = value; }
+  void set_beep_switch(TclSwitch *value) { this->beep_switch_ = value; }
+  void set_health_switch(TclSwitch *value) { this->health_switch_ = value; }
   void set_display_ignore_appliance_state(bool value) {
     this->display_ignore_appliance_state_ = value;
   }
   void set_health_ignore_appliance_state(bool value) {
     this->health_ignore_appliance_state_ = value;
   }
-  void set_restore_state_switch(switch_::Switch *value) {
+  void set_restore_state_switch(TclSwitch *value) {
     this->restore_state_switch_ = value;
   }
 
@@ -125,7 +127,7 @@ class TclClimate final : public climate::Climate,
   bool bus_is_quiet_();
   bool status_confirms_command_(const TclProtocolState &state) const;
   bool off_epoch_active_() const;
-  void restore_switch_(switch_::Switch *entity, TclSwitchType type);
+  void restore_switch_(TclSwitch *entity, TclSwitchType type);
 
   TclFrameParser parser_{};
   TclProtocolState state_{};
@@ -200,10 +202,10 @@ class TclClimate final : public climate::Climate,
   float last_published_target_temperature_{0.0f};
   float last_published_current_temperature_{0.0f};
 
-  switch_::Switch *display_switch_{nullptr};
-  switch_::Switch *beep_switch_{nullptr};
-  switch_::Switch *health_switch_{nullptr};
-  switch_::Switch *restore_state_switch_{nullptr};
+  TclSwitch *display_switch_{nullptr};
+  TclSwitch *beep_switch_{nullptr};
+  TclSwitch *health_switch_{nullptr};
+  TclSwitch *restore_state_switch_{nullptr};
   bool display_ignore_appliance_state_{false};
   bool health_ignore_appliance_state_{false};
 
