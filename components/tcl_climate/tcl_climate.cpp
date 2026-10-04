@@ -9,7 +9,7 @@
 #include "esphome/core/log.h"
 #include "esphome/core/preferences.h"
 #include "tcl_state_policy.h"
-#include "switch/tcl_switch.h"
+#include "tcl_switch.h"
 
 namespace esphome::tcl_climate {
 

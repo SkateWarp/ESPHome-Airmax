@@ -50,6 +50,17 @@ g++ \
 
 "$build_dir/test_tcl_switch_lifecycle"
 
+# ESPHome copies the root component files but omits the switch/ platform files
+# when no TCL switch entities are configured. Check that shape separately.
+mkdir "$build_dir/climate_only"
+cp "$project_dir/components/tcl_climate/"*.h "$build_dir/climate_only/"
+cp "$project_dir/components/tcl_climate/tcl_climate.cpp" "$build_dir/climate_only/"
+g++ \
+  -std=c++17 -Wall -Wextra -Wpedantic -Werror -fsyntax-only \
+  -I "$project_dir/tests/host_stubs" \
+  "$build_dir/climate_only/tcl_climate.cpp"
+echo "Climate-only component header regression passed."
+
 esphome_bin="${ESPHOME_BIN:-esphome}"
 if command -v "$esphome_bin" >/dev/null 2>&1; then
   "$esphome_bin" config "$project_dir/tests/test_host.yaml"
